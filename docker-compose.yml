@@ -1,0 +1,119 @@
+version: "3.9"
+
+services:
+  # ── Redis Broker ────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: dcf-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── RQ Dashboard (Monitor de Filas) ─────────────────────────
+  rq-dashboard:
+    image: eoranged/rq-dashboard:latest
+    container_name: dcf-rq-dashboard
+    ports:
+      - "9181:9181"
+    environment:
+      - RQ_DASHBOARD_REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Worker: Scout & Miner ────────────────────────────────────
+  worker-scout:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dcf-worker-scout
+    command: rq worker scout --url redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./output:/app/output
+      - ./credentials:/app/credentials
+    restart: unless-stopped
+
+  # ── Worker: Copywriter ───────────────────────────────────────
+  worker-copywriter:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dcf-worker-copywriter
+    command: rq worker copywriter --url redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./output:/app/output
+      - ./credentials:/app/credentials
+    restart: unless-stopped
+
+  # ── Worker: Video Editor (CPU intensive) ─────────────────────
+  worker-video:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dcf-worker-video
+    command: rq worker video --url redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./output:/app/output
+      - ./credentials:/app/credentials
+    shm_size: '2gb'
+    restart: unless-stopped
+
+  # ── Worker: Designer ─────────────────────────────────────────
+  worker-designer:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dcf-worker-designer
+    command: rq worker designer --url redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./output:/app/output
+      - ./credentials:/app/credentials
+    restart: unless-stopped
+
+  # ── Worker: Upload & Analyst ─────────────────────────────────
+  worker-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dcf-worker-manager
+    command: rq worker upload analytics --url redis://redis:6379/0
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./output:/app/output
+      - ./credentials:/app/credentials
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+
+networks:
+  default:
+    name: dcf-network

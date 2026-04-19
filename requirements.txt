@@ -1,0 +1,70 @@
+# ============================================================
+# Dark Channel Factory — Requirements
+# ============================================================
+
+# --- LLM Providers ---
+google-generativeai>=0.8.0
+openai>=1.30.0
+anthropic>=0.28.0
+
+# --- Queue & Scheduling ---
+redis>=5.0.0
+rq>=1.16.0
+rq-scheduler>=0.13.0
+apscheduler>=3.10.4
+
+# --- Data Validation ---
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+
+# --- Environment ---
+python-dotenv>=1.0.0
+
+# --- YouTube & Google APIs ---
+google-api-python-client>=2.130.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+
+# --- Text-to-Speech (FREE — Azure Neural via Edge) ---
+edge-tts>=6.1.12
+
+# --- Video Processing ---
+moviepy>=1.0.3
+ffmpeg-python>=0.2.0
+Pillow>=10.3.0
+numpy>=1.26.0
+
+# --- Subtitle / Caption ---
+pysrt>=1.1.2
+
+# --- Web Scraping & Trends ---
+pytrends>=4.9.2
+requests>=2.31.0
+httpx>=0.27.0
+beautifulsoup4>=4.12.3
+
+# --- Browser Automation (channel setup only) ---
+playwright>=1.44.0
+
+# --- Media Assets ---
+# Pexels API — no pip package needed, uses requests
+# Unsplash API — no pip package needed, uses requests
+
+# --- Image Generation ---
+# Uses openai for DALL-E 3 (already above)
+
+# --- Utilities ---
+rich>=13.7.0
+colorama>=0.4.6
+tenacity>=8.3.0
+schedule>=1.2.1
+aiofiles>=23.2.1
+aiohttp>=3.9.5
+python-slugify>=8.0.0
+humanize>=4.9.0
+
+# --- Testing ---
+pytest>=8.2.0
+pytest-asyncio>=0.23.6
+pytest-mock>=3.14.0
+httpretty>=1.1.4

@@ -1,0 +1,11 @@
+# dark-channel-factory cloud-hub requirements
+fastapi
+uvicorn
+sqlmodel
+psycopg2-binary
+python-dotenv
+google-generativeai
+openai
+pydantic-settings
+requests
+tenacity
