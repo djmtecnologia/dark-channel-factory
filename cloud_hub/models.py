@@ -4,7 +4,6 @@ from uuid import UUID, uuid4
 from typing import List, Optional, Dict
 from datetime import datetime, timezone
 from sqlmodel import Field, Relationship, SQLModel
-from sqlalchemy import Column
 from sqlalchemy.dialects.postgresql import JSONB
 
 # --- 1. Tenants (Empresas/Agencias) ---
@@ -47,13 +46,21 @@ class VideoJob(SQLModel, table=True):
     topic: Optional[str] = None
     angle: Optional[str] = None
     
-    # PostgreSQL JSONB fields (Mais robusto)
-    target_keywords: List[str] = Field(default_factory=list, sa_column=Column(JSONB))
+    # PostgreSQL JSONB fields - Sintaxe direta sem Column()
+    target_keywords: List[str] = Field(default_factory=list, sa_type=JSONB)
     viral_score: Optional[float] = None
-    script_data: Dict = Field(default_factory=dict, sa_column=Column(JSONB))
-    thumbnail_data: Dict = Field(default_factory=dict, sa_column=Column(JSONB))
+    script_data: Dict = Field(default_factory=dict, sa_type=JSONB)
+    thumbnail_data: Dict = Field(default_factory=dict, sa_type=JSONB)
     
     injected_affiliate_url: Optional[str] = None
+    
+    # Worker tracking & error handling
+    worker_id: Optional[str] = None
+    error_message: Optional[str] = None
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     # Relacionamentos
     channel: Optional[Channel] = Relationship(back_populates="video_jobs")
