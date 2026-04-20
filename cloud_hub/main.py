@@ -13,6 +13,11 @@ load_dotenv()
 
 # Configurações do Banco Neon
 DATABASE_URL = os.getenv("DATABASE_URL")
+# Adiciona sslmode=require se não estiver presente na string do Neon
+if "sslmode=" not in DATABASE_URL:
+    separator = "&" if "?" in DATABASE_URL else "?"
+    DATABASE_URL += f"{separator}sslmode=require"
+
 engine = create_engine(DATABASE_URL)
 
 app = FastAPI(title="Dark Channel Factory Cloud-Hub API", version="2.1")
@@ -21,6 +26,10 @@ app = FastAPI(title="Dark Channel Factory Cloud-Hub API", version="2.1")
 def get_session():
     with Session(engine) as session:
         yield session
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "healthy", "server": "vercel", "db": "connected" if engine else "error"}
 
 
 # =============================================================================

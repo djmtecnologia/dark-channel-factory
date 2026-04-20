@@ -231,3 +231,12 @@ def get_llm_client() -> LLMClient:
     if _llm_client_instance is None:
         _llm_client_instance = LLMClient()
     return _llm_client_instance
+
+def get_completion(prompt: str, system_instruction: str = "", model_choice: str = "gemini") -> str:
+    """Função de conveniência para os novos agentes SaaS."""
+    client = get_llm_client()
+    try:
+        response = client.complete(system_prompt=system_instruction, user_prompt=prompt)
+        return response.text
+    except Exception as e:
+        return f"❌ Erro LLM: {str(e)}"

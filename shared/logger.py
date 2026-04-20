@@ -26,23 +26,26 @@ def setup_logging(log_level: str | None = None) -> None:
     level_str = log_level or os.getenv("LOG_LEVEL", "INFO")
     level = getattr(logging, level_str.upper(), logging.INFO)
 
-    # Handler de arquivo
-    logs_dir = Path(os.getenv("LOGS_DIR", "output/logs"))
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_file = logs_dir / "pipeline.log"
+    handlers = [
+        RichHandler(
+            console=console,
+            rich_tracebacks=True,
+            show_path=False,
+            markup=True,
+        )
+    ]
+
+    # Só adiciona FileHandler se NÃO estiver no Vercel
+    if not os.getenv("VERCEL"):
+        logs_dir = Path(os.getenv("LOGS_DIR", "output/logs"))
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_file = logs_dir / "pipeline.log"
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
 
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-        handlers=[
-            RichHandler(
-                console=console,
-                rich_tracebacks=True,
-                show_path=False,
-                markup=True,
-            ),
-            logging.FileHandler(log_file, encoding="utf-8"),
-        ],
+        handlers=handlers,
     )
     _configured = True
 

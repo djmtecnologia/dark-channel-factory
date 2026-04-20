@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlmodel import Session
 from cloud_hub.models import VideoJob, Channel
 from cloud_hub.core.monetization import get_best_match_product, inject_tracking_link
-from shared_v2.llm_client import get_completion
+from shared.llm_client import get_completion
 
 SYSTEM_PROMPT = """
 You are lead Copywriter for a YouTube Dark Channel Factory.
