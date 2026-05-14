@@ -1,0 +1,14 @@
+.venv/
+venv/
+env/
+__pycache__/
+output/
+logs/
+dist/
+build/
+bin/
+temp/
+.vercel/
+*.mp4
+*.exe
+.git/
