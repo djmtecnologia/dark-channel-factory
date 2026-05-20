@@ -94,9 +94,9 @@ class ValidatorAgent:
             if not has_video or not has_audio:
                 self.errors.append("Vídeo sem stream de áudio ou vídeo detectado.")
             
-            expected_min = 20 if self.video_type == "SHORT" else 120
+            expected_min = 20 if self.video_type == "SHORT" else 720
             if duration < expected_min:
-                self.errors.append(f"Duração ({duration:.1f}s) abaixo do mínimo para {self.video_type}.")
+                self.errors.append(f"Duração ({duration:.1f}s) abaixo do mínimo para {self.video_type} (Mínimo: 720s).")
                 
             # Verifica resolução
             video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)

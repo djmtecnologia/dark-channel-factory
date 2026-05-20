@@ -40,8 +40,8 @@ class ViralScriptFactory:
         5. Conclusion: High-ticket CTA.
         
         Requirements:
-        - Generate at least 80 detailed scenes.
-        - Output ONLY as JSON: {{"title": "...", "description": "...", "tags": [...], "scenes": [...]}}
+        - Output ONLY as JSON: {"title": "...", "description": "...", "tags": [...], "scenes": [{"id": 1, "text": "...", "b_roll_visual": "...", "sfx_cue": "..."}]}
+        - ABSOLUTELY CRITICAL: The script MUST be at least 2500 words long to fill a 12-minute video. Generate at least 50 detailed scenes with long, engaging narration text in each. Do not summarize. Write the full spoken script.
         """
         
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -49,8 +49,9 @@ class ViralScriptFactory:
             r = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json={
                 "model": self.model,
                 "messages": [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"}
-            }, timeout=120)
+                "response_format": {"type": "json_object"},
+                "max_tokens": 8000
+            }, timeout=180)
             
             r.raise_for_status()
             script_data = r.json()['choices'][0]['message']['content']

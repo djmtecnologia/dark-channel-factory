@@ -35,7 +35,7 @@ async def create_real_viral_jobs(channel, count):
     print(f"🔎 [SCOUT] Minerando {count} tendências para o Canal {channel.identifier} (Região: {region})...")
     scout = ViralScout()
     # niche=None ativa a rotação aleatória de temas (IA, Financial, Web3)
-    trends = scout.get_viral_videos(niche=None, region=region, days=30)
+    trends = scout.get_viral_videos(niche=None, region=region, days=7)
     
     if not trends:
         print(f"⚠️ Nenhuma tendência fresca para {region}. Usando temas da Blueprint 2026.")
@@ -66,7 +66,7 @@ async def create_real_viral_jobs(channel, count):
             
     return job_ids
 
-async def setup_elite_staging(force_quota=False):
+async def setup_elite_staging(force_quota=False, target_langs=""):
     print("====================================================")
     print("🛡️  DARK CHANNEL FACTORY - MODO MULTI-CANAL ELITE")
     if force_quota:
@@ -90,6 +90,11 @@ async def setup_elite_staging(force_quota=False):
             {"name": "IA Dinero España", "id": "es-ES", "region": "ES", "lang": "es-ES", "voice": "es-ES-ElviraNeural"},
             {"name": "KI Geld Deutschland", "id": "de-DE", "region": "DE", "lang": "de-DE", "voice": "de-DE-KatjaNeural"}
         ]
+
+        if target_langs:
+            langs_list = [l.strip() for l in target_langs.split(',')]
+            channel_configs = [c for c in channel_configs if c["id"] in langs_list]
+            print(f"🎯 [Filtro] Produzindo apenas para: {langs_list}")
 
         for config in channel_configs:
             channel = session.exec(select(Channel).where(Channel.identifier == config["id"])).first()
@@ -178,9 +183,10 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="Força geração mesmo se cota atingida")
+    parser.add_argument("--langs", type=str, default="", help="Filtra por idiomas especificos (ex: es-ES,de-DE)")
     args = parser.parse_args()
 
-    job_ids = await setup_elite_staging(force_quota=args.force)
+    job_ids = await setup_elite_staging(force_quota=args.force, target_langs=args.langs)
     
     for jid in job_ids:
         await run_elite_pipeline(jid)

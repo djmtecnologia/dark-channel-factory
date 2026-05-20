@@ -106,7 +106,7 @@ def check_database_connection() -> Tuple[bool, str]:
     """Testa conexão com banco de dados"""
     try:
         from dotenv import load_dotenv
-        from sqlmodel import create_engine
+        from sqlmodel import create_engine, text
         
         load_dotenv()
         DATABASE_URL = os.getenv("DATABASE_URL")
@@ -116,8 +116,8 @@ def check_database_connection() -> Tuple[bool, str]:
         
         engine = create_engine(DATABASE_URL)
         with engine.connect() as conn:
-            # Testa query simples
-            result = conn.execute("SELECT 1")
+            # Testa query simples usando text() compatível com SQLAlchemy 2.0
+            result = conn.execute(text("SELECT 1"))
             return True, f"Conectado: {DATABASE_URL[:30]}..."
     except Exception as e:
         return False, f"Erro: {str(e)[:50]}"
@@ -140,7 +140,7 @@ def check_redis_connection() -> Tuple[bool, str]:
 def check_model_imports() -> List[Tuple[str, bool, str]]:
     """Verifica se modelos carregam sem erro"""
     models = [
-        "models",
+        "cloud_hub.models",
     ]
     
     results = []
@@ -192,7 +192,10 @@ def run_health_check():
     # 6. Redis
     print(f"\n{YELLOW}6. Redis{RESET}")
     redis_ok, redis_msg = check_redis_connection()
-    print(f"  {check_mark(redis_ok)} {redis_msg}")
+    if redis_ok:
+        print(f"  {GREEN}✓{RESET} {redis_msg}")
+    else:
+        print(f"  {YELLOW}⚠️  {redis_msg} (Opcional - O Worker de Edição funcionará perfeitamente usando fallback HTTP/REST){RESET}")
     
     # 7. Modelos
     print(f"\n{YELLOW}7. Modelos e Imports{RESET}")

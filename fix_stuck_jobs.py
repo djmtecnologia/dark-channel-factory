@@ -77,18 +77,21 @@ with engine.connect() as conn:
     # 3. Aplica o reset atomicamente
     print("\n[RESET] Aplicando reset...")
 
+    from datetime import datetime, timezone
+    reset_msg = f"[RESET] Era zumbi -- reiniciado em {datetime.now(timezone.utc).isoformat()}"
+
     # SQLAlchemy 2.x usa autobegin: a conexao ja esta em transacao.
-    # NAO chamar conn.begin() novamente -- isso causa InvalidRequestError.
+    # SQL robusto e compativel com SQLite e PostgreSQL
     result = conn.execute(
         text("""
             UPDATE video_jobs
             SET status = :new_status,
-                error_message = CONCAT('[RESET] Era: ', status, ' -- reiniciado em ', NOW()::text)
-            WHERE status = ANY(:stuck_states)
+                error_message = :reset_msg
+            WHERE status IN ('THINKING', 'DRAFTED', 'PROCESSING', 'UPLOADING')
         """),
         {
             "new_status": RESET_TO,
-            "stuck_states": STUCK_STATES
+            "reset_msg": reset_msg
         }
     )
     rows_updated = result.rowcount

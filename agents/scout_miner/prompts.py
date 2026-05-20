@@ -19,6 +19,7 @@ Analyze the given niche category and trending data to identify ONE specific vide
 2. MONETIZATION SPEED: High advertiser CPM ($20-40 for B2B/SaaS/Finance) AND high probability of clicking an affiliate link.
 3. SEARCH VOLUME: High monthly searches, rising trend.
 4. COMPETITION GAP: Existing videos have weaknesses you can exploit.
+5. MODELING SUCCESS (NEW): If 'modeling_targets' (Hot Topics with high views) are provided in the data, you MUST model your topic heavily after the top viewed titles. Mimic their framing but add your unique content gap.
 
 NICHE FOCUS: AI Tools & Business Automation
 Target CPM: $25-40 (B2B Software category)

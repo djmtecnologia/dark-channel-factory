@@ -24,20 +24,90 @@ class ViralScout:
             "Algorithmic Trading IA"
         ]
 
-    def get_viral_videos(self, niche=None, region="US", days=30):
-        """Busca videos que viralizaram no periodo, alternando nichos se nenhum for passado."""
+    def check_google_trends(self, niche, region="US"):
+        """Busca tendências gerais das últimas 24/48h via RSS (à prova de bloqueios) e usa IA para a ponte."""
+        print(f"📈 [Google Trends] Buscando tendências via RSS Oficial (anti-bloqueio) para adaptar ao nicho: {niche}")
+        try:
+            import requests
+            import xml.etree.ElementTree as ET
+            
+            # O RSS do Google Trends usa a sigla da região direta (US, BR, FR, ES, DE)
+            rss_url = f"https://trends.google.com/trending/rss?geo={region}"
+            
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+                r = requests.get(rss_url, headers=headers, timeout=10)
+                r.raise_for_status()
+                root = ET.fromstring(r.content)
+                
+                top_trends = []
+                for item in root.findall('.//item'):
+                    title = item.find('title')
+                    if title is not None and title.text:
+                        top_trends.append(title.text)
+                
+                if not top_trends:
+                    raise ValueError("RSS retornou vazio")
+                    
+                top_trends = top_trends[:10]
+            except Exception as e:
+                print(f"⚠️ [RSS Trends] Falha ao ler feed RSS: {e}")
+                # Fallback estático de segurança caso o Google mude a URL do RSS
+                top_trends = ["AI Economy", "Future Tech 2026", "Global Crisis", "New Digital Money"]
+
+            print(f"🔥 [TRENDS] Top Assuntos nas últimas 24h ({region}): {top_trends[:3]}...")
+            
+            # Chama a IA para conectar a tendência viral com o nosso nicho (Bridge)
+            try:
+                import sys
+                from shared.ai_orchestrator import AIOrchestrator
+                
+                prompt = f"""You are a viral YouTube content strategist for region {region}.
+Channel Niche: {niche}
+Top 10 trending topics right now in {region}:
+{top_trends}
+
+Task:
+1. Understand the true local/cultural context of these trends (e.g. 'Racing' in Spain is a soccer team, not car racing).
+2. Select 1 trending topic from the list and creatively bridge it with the channel's niche.
+   RULE: You MUST explicitly include the subject/name of the chosen trend in your final concept!
+   Example: If trend is 'Granada' (soccer) and niche is 'AI', the topic is 'How AI is predicting Granada matches'.
+3. OUTPUT STRICTLY A YOUTUBE SEARCH QUERY in English (max 7 words). DO NOT output conversational text. DO NOT use quotes.
+Example Output: AI predicting Granada soccer matches"""
+                
+                ai = AIOrchestrator()
+                resp = ai.chat_completion(system_prompt="You are a brilliant YouTube strategist.", user_prompt=prompt)
+                bridged_topic = resp.text.strip(' "\'\n')
+                print(f"🧠 [IA Bridge] Tópico Híbrido Criado: '{bridged_topic}'")
+                return bridged_topic
+                
+            except Exception as e:
+                print(f"⚠️ [IA Bridge] Falha de conexao com a IA: {e}")
+                return top_trends[0] + " " + niche
+                
+        except Exception as e:
+            print(f"⚠️ [TRENDS] Erro fatal no motor de tendências: {e}")
+            
+        return None
+
+    def get_viral_videos(self, niche=None, region="US", days=7):
+        """Busca videos que viralizaram baseados no Google Trends ou no nicho."""
         import random
         if not niche:
             niche = random.choice(self.niches)
             
-        print(f"🔎 [SCOUT] Minerando videos virais ({niche}) nos {region} nos ultimos {days} dias...")
+        # 1. Verifica no Google Trends se há um sub-tópico fervendo
+        hot_topic = self.check_google_trends(niche, region)
+        search_query = hot_topic if hot_topic else niche
+            
+        print(f"🔎 [SCOUT] Minerando no YouTube: '{search_query}' (Região: {region}, Últimos {days} dias)...")
         
         published_after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
         
         search_url = f"{self.base_url}/search"
         params = {
             "part": "snippet",
-            "q": niche,
+            "q": search_query,
             "regionCode": region,
             "relevanceLanguage": "en",
             "type": "video",
@@ -52,6 +122,17 @@ class ViralScout:
             r.raise_for_status()
             items = r.json().get("items", [])
             
+            # Se a busca no YouTube retornou vazia mas temos um topico quente do Google Trends, usamos ele!
+            if not items and hot_topic:
+                print(f"💡 [SCOUT FALLBACK] Nao encontramos videos no YouTube para a query '{search_query}'. Usando topico do Google Trends diretamente.")
+                return [{
+                    "id": "trends_fallback",
+                    "title": hot_topic,
+                    "url": "",
+                    "publishedAt": datetime.utcnow().isoformat(),
+                    "thumb": ""
+                }]
+            
             videos = []
             for item in items:
                 v_id = item["id"]["videoId"]
@@ -62,9 +143,24 @@ class ViralScout:
                     "publishedAt": item["snippet"]["publishedAt"],
                     "thumb": item["snippet"]["thumbnails"]["high"]["url"]
                 })
+            
+            # Garantir que o tópico híbrido gerado pelo Google Trends não seja descartado/ignorado
+            if hot_topic and videos:
+                print(f"🔥 [SCOUT] Protegendo tendência do Google Trends: Definindo título principal como '{hot_topic}'")
+                videos[0]["title"] = hot_topic
+
             return videos
         except Exception as e:
             print(f"❌ [SCOUT ERR] Falha na mineracao: {e}")
+            if hot_topic:
+                print(f"💡 [SCOUT FALLBACK] Usando topico hibrido do Google Trends diretamente apos falha: '{hot_topic}'")
+                return [{
+                    "id": "trends_fallback",
+                    "title": hot_topic,
+                    "url": "",
+                    "publishedAt": datetime.utcnow().isoformat(),
+                    "thumb": ""
+                }]
             return []
 
     def analyze_video_strategy(self, video_id):

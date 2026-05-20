@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone, date
 import json
 import subprocess
 import time
+import hashlib
 import warnings
-from requests.packages.urllib3.exceptions import DependencyWarning
-warnings.filterwarnings("ignore", category=DependencyWarning)
+warnings.filterwarnings("ignore", module="urllib3")
 
 # ══════════════════════════════════════════════════════════════
 # BOOTSTRAPPER — Primeira coisa a rodar!
@@ -57,6 +57,8 @@ from pysubs2 import SSAFile, SSAEvent
 
 # Carrega chaves de API e URLs
 load_dotenv()
+os.environ["COQUI_TOS_AGREED"] = "1"
+os.environ["PYTHONIOENCODING"] = "utf-8"
 
 # ==========================================
 # 0. INICIALIZAÇÃO DE MODELOS E FILAS
@@ -101,6 +103,16 @@ def upload_worker_loop():
             
             if affiliate_link and affiliate_link not in desc:
                 desc += f"\n\n👉 Get started here: {affiliate_link}"
+            
+            disclaimers = {
+                "en-US": "⚠️ DISCLAIMER: This video presents a high-tech speculative and predictive scenario based on AI analysis and industrial foresight. The scenarios described are speculative concepts for educational and analytical purposes.",
+                "pt-BR": "⚠️ AVISO: Este vídeo apresenta um cenário especulativo e preditivo de alta tecnologia baseado em análise de IA e visão industrial. Os cenários descritos são conceitos especulativos para fins educacionais e analíticos.",
+                "es-ES": "⚠️ DESCARGO DE RESPONSABILIDAD: Este video presenta un escenario especulativo y predictivo de alta tecnología basado en análisis de IA y previsión industrial. Los escenarios descritos son conceptos especulativos con fines educativos y analíticos.",
+                "fr-FR": "⚠️ AVERTISSEMENT : Cette vidéo présente un scénario spéculatif et prédictif de haute technologie basé sur l'analyse de l'IA et la prospective industrielle. Les scénarios décrits sont des concepts spéculatifs à des fins éducatives et analytiques.",
+                "de-DE": "⚠️ HINWEIS: Dieses Video zeigt ein spekulatives und prädiktives Hightech-Szenario, das auf KI-Analysen und industrieller Vorausschau basiert. Die beschriebenen Szenarien sind spekulative Konzepte für bildende und analytische Zwecke."
+            }
+            lang_key = language if language in disclaimers else "en-US"
+            desc += f"\n\n{disclaimers[lang_key]}"
             
             video_url = publish_video_to_youtube(
                 video_path=video_path,
@@ -172,6 +184,139 @@ def run_voice_gen(text, output_path, voice=VOICE_DEFAULT):
         # Se não houver loop, usamos o padrão síncrono do asyncio
         asyncio.run(generate_voice_audio(text, output_path, voice))
 
+def generate_voice_master(text, output_path, voice=VOICE_DEFAULT, language="en-US", job_data=None):
+    """Orquestrador de TTS: Usa clonagem local do Cid Moreira por padrão para todos os idiomas"""
+    
+    # Força a clonagem para TODOS os vídeos gerados na fábrica
+    use_cloning = True
+    
+    # O usuário pediu para usar o teste_cid_moreira.wav, mas usaremos a referência limpa original 
+    # se ela existir para garantir a emoção humana máxima (evitando cópia da cópia).
+    # Se ele mandou usar o teste_cid_moreira.wav especificamente, vamos tentar usar ele como fallback.
+    master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\cid_moreira_reference.wav"
+    if not os.path.exists(master_reference):
+        master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\teste_cid_moreira.wav"
+        
+    ref_audio = master_reference
+    ref_start = "00:00:00"
+    ref_duration = "10"
+    
+    if job_data and job_data.get("use_voice_cloning", False):
+        # Permite override se o job_data trouxer outro áudio específico
+        ref_audio = job_data.get("voice_reference_url", master_reference)
+        ref_start = job_data.get("voice_reference_start", "00:00:00")
+        ref_duration = job_data.get("voice_reference_duration", "10")
+        
+    # Se configurado para clonar e tem URL/Caminho
+    if use_cloning and ref_audio:
+        try:
+            from agents.video_editor.local_voice_cloner import download_reference_audio, generate_local_cloned_voice
+            import hashlib
+            
+            # 1. Prepara o áudio de referência (Baixa do YouTube se necessário)
+            ref_id = hashlib.md5(f"{ref_audio}_{ref_start}_{ref_duration}".encode()).hexdigest()[:8]
+            ref_wav_path = os.path.join(ASSETS_CACHE, f"ref_{ref_id}.wav")
+            
+            ref_ready = True
+            if not os.path.exists(ref_wav_path):
+                if ref_audio.startswith("http"):
+                    ref_ready = download_reference_audio(ref_audio, ref_wav_path, start_time=ref_start, duration=ref_duration)
+                elif os.path.exists(ref_audio):
+                    import shutil
+                    shutil.copy2(ref_audio, ref_wav_path)
+                    ref_ready = True
+                else:
+                    ref_ready = False
+                    
+            # 2. Se referência está pronta, gera clonagem local
+            if ref_ready:
+                import subprocess
+                venv_py = os.path.join("venv_clonagem", "Scripts", "python.exe")
+                script_path = os.path.join("agents", "video_editor", "local_voice_cloner.py")
+                
+                if os.path.exists(venv_py) and os.path.exists(script_path):
+                    print(f"🔄 [Bridge] Usando venv_clonagem legado para XTTSv2 no Python 3.11...")
+                    temp_txt_path = os.path.join(ASSETS_CACHE, f"temp_tts_text_{ref_id}.txt")
+                    try:
+                        with open(temp_txt_path, "w", encoding="utf-8") as temp_f:
+                            temp_f.write(text)
+                    except Exception as txt_err:
+                        print(f"⚠️ [Clonagem Bridge] Falha ao criar arquivo de texto temporário: {txt_err}")
+                        temp_txt_path = None
+                    
+                    if temp_txt_path and os.path.exists(temp_txt_path):
+                        cmd = [
+                            venv_py, script_path, 
+                            "--text_file", temp_txt_path, 
+                            "--lang", language, 
+                            "--ref", ref_wav_path, 
+                            "--out", output_path
+                        ]
+                    else:
+                        cmd = [
+                            venv_py, script_path, 
+                            "--text", text[:4000], # Fallback para tamanho reduzido para evitar falha do cmd
+                            "--lang", language, 
+                            "--ref", ref_wav_path, 
+                            "--out", output_path
+                        ]
+                        
+                    result = subprocess.run(cmd, stdout=None, stderr=None)
+                    
+                    # Limpa o arquivo temporário
+                    if temp_txt_path and os.path.exists(temp_txt_path):
+                        try: os.remove(temp_txt_path)
+                        except: pass
+                        
+                    if result.returncode == 0 and os.path.exists(output_path):
+                        success = True
+                    else:
+                        print(f"⚠️ [Clonagem Bridge] Erro do Subprocesso (código de retorno: {result.returncode}). Verifique os logs acima.")
+                        success = False
+                else:
+                    success = generate_local_cloned_voice(text, language, ref_wav_path, output_path)
+                    
+                if success:
+                    return output_path
+        except Exception as e:
+            print(f"⚠️ [Clonagem] Falha na clonagem local XTTSv2, voltando ao Edge-TTS: {e}")
+            
+    # ── Fallback 2: CHATTERBOX TTS (Free, Cinematic, ElevenLabs-quality alternative) ──
+    try:
+        from agents.video_editor.chatterbox_tts import (
+            check_chatterbox_available, generate_chatterbox_audio,
+            select_voice_profile, print_install_instructions
+        )
+        if check_chatterbox_available():
+            voice_profile = select_voice_profile(job_data or {})
+            # Usa o mesmo arquivo de referência do XTTSv2 como voice cloning no Chatterbox
+            ref_audio_for_chatterbox = None
+            if os.path.exists(master_reference):
+                ref_audio_for_chatterbox = master_reference
+            
+            success = generate_chatterbox_audio(
+                text=text,
+                output_path=output_path,
+                voice_profile=voice_profile,
+                reference_audio=ref_audio_for_chatterbox,
+                language=language,
+            )
+            if success:
+                return output_path
+            else:
+                print("\u26a0\ufe0f [CHATTERBOX] Falha na gera\u00e7\u00e3o. Voltando ao Edge-TTS.")
+        else:
+            print_install_instructions()
+            print("\u26a0\ufe0f [CHATTERBOX] N\u00e3o instalado. Usando Edge-TTS como fallback.")
+    except Exception as e:
+        print(f"\u26a0\ufe0f [CHATTERBOX] Erro: {e}. Voltando ao Edge-TTS.")
+
+    # ── Fallback Final: Microsoft Edge-TTS (r\u00e1pido, gratuito, sempre dispon\u00edvel) ──
+    # Speed +10% garante ritmo din\u00e2mico, rate extra para n\u00edtidez em canais dark
+    print(f"\U0001f3a4 [EDGE-TTS] Fallback final: {voice}")
+    run_voice_gen(text, output_path, voice)
+    return output_path
+
 # ==========================================
 # 2. CONFIGURAÇÕES E DIRETÓRIOS
 # ==========================================
@@ -179,7 +324,7 @@ def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'): return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-ffmpeg_exe = "ffmpeg"
+ffmpeg_exe = _DEPS.get("ffmpeg_exe", "ffmpeg")
 
 CLOUD_HUB_URL = os.getenv("CLOUD_HUB_URL", "https://dark-channel-factory.vercel.app")
 WORKER_REGION = "North America"
@@ -327,10 +472,15 @@ def fetch_premium_broll(keyword, used_files=None):
             safe_id = hashlib.md5(entity_url.encode()).hexdigest()[:12]
             local_path = os.path.join(ASSETS_CACHE, f"entity_{safe_id}.jpg")
             if not os.path.exists(local_path):
-                r = requests.get(entity_url, timeout=15)
-                with open(local_path, "wb") as f: f.write(r.content)
-            return local_path
-            
+                try:
+                    r = requests.get(entity_url, timeout=15)
+                    r.raise_for_status()
+                    with open(local_path, "wb") as f: f.write(r.content)
+                    return local_path
+                except Exception as e:
+                    print(f"⚠️ [ENTITY] Falha ao baixar imagem Wiki {entity_url}: {e}")
+            else:
+                return local_path
         # Prioridade 2: Logo (Apenas para Marcas, se Wiki falhar)
         logo_url = fetch_brand_logo(detected_entity)
         if logo_url:
@@ -338,9 +488,15 @@ def fetch_premium_broll(keyword, used_files=None):
             safe_id = hashlib.md5(logo_url.encode()).hexdigest()[:12]
             local_path = os.path.join(ASSETS_CACHE, f"logo_{safe_id}.png")
             if not os.path.exists(local_path):
-                r = requests.get(logo_url, timeout=15)
-                with open(local_path, "wb") as f: f.write(r.content)
-            return local_path
+                try:
+                    r = requests.get(logo_url, timeout=15)
+                    r.raise_for_status()
+                    with open(local_path, "wb") as f: f.write(r.content)
+                    return local_path
+                except Exception as e:
+                    print(f"⚠️ [ENTITY] Falha ao baixar logo de {logo_url}: {e}")
+            else:
+                return local_path
     
     if os.path.exists(PREMIUM_CACHE_DIR):
         for filename in os.listdir(PREMIUM_CACHE_DIR):
@@ -361,7 +517,8 @@ def fetch_premium_broll(keyword, used_files=None):
         return best_match
 
     # Simplificar keyword para as APIs web (mais palavras para ser preciso, mas filtradas)
-    api_query = " ".join(important_words[:7]) if important_words else "artificial intelligence technology"
+    base_query = " ".join(important_words[:7]) if important_words else "artificial intelligence technology"
+    api_query = f"{base_query} bright 4k modern"
 
     # BUG FIX: Usar o path absoluto para checar no used_files antes de retornar do cache de assets
     # Também adicionamos um 'index' opcional ou variação no hash se necessário
@@ -388,6 +545,16 @@ def fetch_premium_broll(keyword, used_files=None):
             best_cache_match = cached_file
     
     if max_hits >= 2: # Se bater 2+ palavras, aproveita o cache!
+        # [FIX] Rename file if it exceeds 100 characters to prevent WinError 206 (MAX_PATH limit)
+        if len(os.path.basename(best_cache_match)) > 100:
+            try:
+                new_name = f"asset_sem_{hashlib.md5(os.path.basename(best_cache_match).encode()).hexdigest()[:12]}.mp4"
+                new_path = os.path.join(ASSETS_CACHE, new_name)
+                os.rename(best_cache_match, new_path)
+                best_cache_match = new_path
+            except Exception:
+                pass
+                
         print(f"✅ [CACHE SEMÂNTICO] Reaproveitando: {os.path.basename(best_cache_match)} (Score: {max_hits})")
         used_files.add(best_cache_match)
         return best_cache_match
@@ -434,6 +601,19 @@ def fetch_premium_broll(keyword, used_files=None):
             print(f"⚠️ [PIXABAY] Falha na conexão: {e}")
         return None
 
+    # 3. Busca Aberta Wikipedia/Wikimedia
+    def try_wikimedia(q):
+        try:
+            import urllib.parse
+            res_raw = requests.get(f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(q)}&utf8=&format=json", timeout=10)
+            if res_raw.status_code == 200:
+                pages = res_raw.json().get("query", {}).get("search", [])
+                for p in pages[:3]:
+                    img = fetch_wiki_image(p["title"])
+                    if img: return img
+        except: pass
+        return None
+
     if not asset_url:
         asset_url = try_pexels(api_query)
         if asset_url: source_name = "Pexels API"
@@ -441,6 +621,10 @@ def fetch_premium_broll(keyword, used_files=None):
     if not asset_url:
         asset_url = try_pixabay(api_query)
         if asset_url: source_name = "Pixabay API"
+        
+    if not asset_url:
+        asset_url = try_wikimedia(api_query)
+        if asset_url: source_name = "Wikimedia API"
         
     # FALLBACK DE BUSCA: Se a frase inteira falhou, tenta palavras importantes e termos de segurança
     if not asset_url:
@@ -598,6 +782,95 @@ def generate_subtitles_locally(audio_path, job_id):
 # ==========================================
 
 def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_durations, total_audio_sec, job_data, is_short=False, music_mood="suspense", sfx_paths=[], thumb_path=None):
+    # Criar links ou cópias curtas para evitar o WinError 206 (limite de tamanho de linha de comando no Windows)
+    temp_dir = os.path.join(OUTPUT_DIR, f"tmp_in_{job_id}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    import shutil
+    
+    def cleanup():
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
+
+    video_paths_original = video_paths.copy()
+    sfx_paths_original = sfx_paths.copy()
+
+    # Deduplicate video/image inputs
+    unique_video_paths = []
+    video_path_to_uniq_idx = {}
+    for p in video_paths:
+        if p not in video_path_to_uniq_idx:
+            video_path_to_uniq_idx[p] = len(unique_video_paths)
+            unique_video_paths.append(p)
+
+    unique_short_video_paths = []
+    for idx, p in enumerate(unique_video_paths):
+        ext = os.path.splitext(p)[1] or (".png" if p.lower().endswith(('.jpg', '.jpeg', '.png')) else ".mp4")
+        short_path = os.path.join(temp_dir, f"v_uniq_{idx}{ext}")
+        try:
+            if os.path.exists(short_path): os.remove(short_path)
+            shutil.copy2(p, short_path)
+        except Exception as e:
+            print(f"⚠️ Erro ao copiar input temporário: {e}")
+            short_path = p
+        unique_short_video_paths.append(short_path)
+
+    # Map each scene's video path to its short path
+    scene_video_paths = [unique_short_video_paths[video_path_to_uniq_idx[p]] for p in video_paths]
+
+    # Deduplicate SFX inputs
+    unique_sfx_paths = []
+    sfx_path_to_uniq_idx = {}
+    for p in sfx_paths:
+        if p and os.path.exists(p):
+            if p not in sfx_path_to_uniq_idx:
+                sfx_path_to_uniq_idx[p] = len(unique_sfx_paths)
+                unique_sfx_paths.append(p)
+
+    unique_short_sfx_paths = []
+    for idx, p in enumerate(unique_sfx_paths):
+        ext = os.path.splitext(p)[1] or ".mp3"
+        short_path = os.path.join(temp_dir, f"sfx_uniq_{idx}{ext}")
+        try:
+            if os.path.exists(short_path): os.remove(short_path)
+            shutil.copy2(p, short_path)
+        except Exception as e:
+            print(f"⚠️ Erro ao copiar sfx temporário: {e}")
+            short_path = p
+        unique_short_sfx_paths.append(short_path)
+
+    # Map each scene's SFX path to its short path
+    scene_sfx_paths = [unique_short_sfx_paths[sfx_path_to_uniq_idx[p]] if (p and os.path.exists(p)) else None for p in sfx_paths]
+
+    # Encurtar audio_path
+    if audio_path and os.path.exists(audio_path):
+        short_audio = os.path.join(temp_dir, f"aud{os.path.splitext(audio_path)[1] or '.mp3'}")
+        try:
+            if os.path.exists(short_audio): os.remove(short_audio)
+            shutil.copy2(audio_path, short_audio)
+            audio_path = short_audio
+        except: pass
+
+    # Encurtar srt_path
+    if srt_path and os.path.exists(srt_path):
+        short_srt = os.path.join(temp_dir, f"srt{os.path.splitext(srt_path)[1] or '.srt'}")
+        try:
+            if os.path.exists(short_srt): os.remove(short_srt)
+            shutil.copy2(srt_path, short_srt)
+            srt_path = short_srt
+        except: pass
+
+    # Encurtar thumb_path
+    if thumb_path and os.path.exists(thumb_path):
+        short_thumb = os.path.join(temp_dir, f"th{os.path.splitext(thumb_path)[1] or '.jpg'}")
+        try:
+            if os.path.exists(short_thumb): os.remove(short_thumb)
+            shutil.copy2(thumb_path, short_thumb)
+            thumb_path = short_thumb
+        except: pass
+
     print(f"⚡ [HARDWARE ACCEL] A utilizar Intel QSV para renderização {'VERTICAL' if is_short else 'HORIZONTAL'}...")
     res = "720x1280" if is_short else "1280x720"
     w, h = (720, 1280) if is_short else (1280, 720)
@@ -609,7 +882,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     filter_complex = ""
     # 1. PROCESSAMENTO DE CADA CENA
     for i, dur in enumerate(clip_durations):
-        v_path = video_paths[i]
+        v_path = scene_video_paths[i]
         is_image = v_path.lower().endswith(('.jpg', '.jpeg', '.png'))
         num_frames = int(dur * 30) + 1
         
@@ -638,44 +911,57 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             zoom_speed = random.uniform(0.0003, 0.0008)
             # Para vídeos, usamos scale + crop dinâmico para simular zoom sem o peso do zoompan
             zoom_factor = f"(1+0.15*t/{dur})" # Zoom de 15% ao longo da duração
-            visual_fx = f"scale=iw*2:ih*2,scale={w}*{zoom_factor}:-1,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
+            visual_fx = f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h},scale=w='{w}*{zoom_factor}':h=-1:eval=frame,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
             
             if is_hook_scene:
-                # HOOK: Adiciona leve tremor (shake) ou glitch opcional
-                # Aqui adicionamos um tremor sutil via crop dinâmico
-                shake_x = f"((iw-ow)/2)+20*sin(2*PI*t*3)"
-                shake_y = f"((ih-oh)/2)+15*cos(2*PI*t*4)"
-                visual_fx = f"scale={int(w*1.3)}:{int(h*1.3)}:force_original_aspect_ratio=increase,crop={w}:{h}:{shake_x}:{shake_y},setsar=1,fps=30,trim=duration={dur}"
+                # HOOK: Acelerado (Sem tremor, apenas zoom limpo para estética B2B)
+                zoom_factor = f"(1+0.25*t/{dur})" # Zoom mais agressivo para o hook
+                visual_fx = f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h},scale=w='{w}*{zoom_factor}':h=-1:eval=frame,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
 
         # Camada de Estilo Sênior: Color Grade Teal & Orange Profissional
         if is_hook_scene:
-            # Hook: Look "Blockbuster" (Teal & Orange agressivo + Nitidez)
-            style_fx = "eq=contrast=1.35:saturation=1.4:brightness=-0.06,unsharp=5:5:1.5:5:5:0.5,vignette=angle=0.6,noise=alls=12:allf=t,format=yuv420p"
+            # Hook: Look "Blockbuster" + B2B Premium
+            style_fx = "eq=brightness=0.03:contrast=1.1:saturation=1.1,unsharp=5:5:1.5:5:5:0.5,vignette=angle=0.6,noise=alls=12:allf=t,format=yuv420p"
         else:
-            # Padrão: Cinematic soft (Contraste equilibrado + Vignette)
-            style_fx = "eq=contrast=1.25:saturation=1.3:brightness=-0.04,unsharp=3:3:0.8:3:3:0.4,vignette=angle=0.5,noise=alls=7:allf=t,format=yuv420p"
+            # Padrão: Cinematic soft + B2B Premium
+            style_fx = "eq=brightness=0.03:contrast=1.1:saturation=1.1,unsharp=3:3:0.8:3:3:0.4,vignette=angle=0.5,noise=alls=7:allf=t,format=yuv420p"
+        
+        # ── Retention Engine: apply visual_cue directive from script JSON ──
+        # scene_visual_cues is built in render_video() and passed via job_data
+        scene_cues_map = job_data.get("_scene_visual_cues", []) if job_data else []
+        if i < len(scene_cues_map) and scene_cues_map[i]:
+            visual_fx = _apply_visual_cue_fx(visual_fx, scene_cues_map[i], dur)
         
         # Transição: fade mais lento no hook para maior impacto
         fade_dur = 1.2 if is_hook_scene else 0.7
         fade_in = "" if i == 0 else f"fade=t=in:st=0:d={fade_dur},"
         trans_fx = f"{fade_in}fade=t=out:st={max(0, dur-fade_dur)}:d={fade_dur}"
         
-        filter_complex += f"[{i+1}:v]{visual_fx},{style_fx},{trans_fx},setpts=PTS-STARTPTS[v{i}];"
+        uniq_idx = video_path_to_uniq_idx[video_paths_original[i]]
+        input_idx = 1 + uniq_idx
+        filter_complex += f"[{input_idx}:v]{visual_fx},{style_fx},{trans_fx},setpts=PTS-STARTPTS[v{i}];"
 
-    concat_nodes = "".join([f"[v{i}]" for i in range(len(video_paths))])
     
     concat_nodes = "".join([f"[v{i}]" for i in range(len(video_paths))])
+
+    # Combinar todos os nós de vídeo em um único stream
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
     # Pré-computa índice real da thumbnail (adicionada após música + SFX)
     # Índices: 0=audio, 1..N=vídeos, N+1=música, N+2..N+1+sfx=SFX, N+2+sfx=thumb
+    num_uniq_videos = len(unique_short_video_paths)
     music_file = fetch_background_music(music_mood)
     has_music = music_file and os.path.exists(music_file)
     bg_music_fallback = get_resource_path("channel_setup/assets/audio/background_suspense.mp3")
     _has_any_music_input = has_music or os.path.exists(bg_music_fallback)
-    _valid_sfx_count = sum(1 for s in sfx_paths if s and os.path.exists(s))
-    # Thumb é sempre o último input: após videos + música (se houver) + SFX
-    thumb_input_idx = len(video_paths) + (1 if _has_any_music_input else 0) + 1 + _valid_sfx_count
+    
+    music_input_idx = None
+    if _has_any_music_input:
+        music_input_idx = num_uniq_videos + 1
+        
+    sfx_start_idx = num_uniq_videos + (2 if _has_any_music_input else 1)
+    num_uniq_sfx = len(unique_short_sfx_paths)
+    thumb_input_idx = sfx_start_idx + num_uniq_sfx
     
     if is_short:
         if thumb_path and os.path.exists(thumb_path):
@@ -694,21 +980,21 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
         filter_complex += f"{concat_nodes}concat=n={len(video_paths)}:v=1:a=0[v_final];"
     
     # 2. MIXAGEM DE ÁUDIO DINÂMICA
-    filter_complex += f"[0:a]volume=2.0,compand=attacks=0:points=-80/-80|-12/-12|0/-3[voice];"
+    # loudnorm = Normalização EBU R128 (padrão YouTube/Spotify: I=-14 LUFS, TP=-1.5 dB)
+    # Garante que a narração XTTSv2 (naturalmente baixa) saia em volume broadcast máximo
+    filter_complex += f"[0:a]loudnorm=I=-14:TP=-1.5:LRA=11[voice];"
     
-    # has_music e music_file já foram computados acima (pre-fetch para cálculo do thumb_input_idx)
-    
-
     if has_music:
-        music_idx = len(video_paths) + 1
-        filter_complex += f"[{music_idx}:a]volume=0.15,aloop=loop=-1:size=2e+09[bgm];"
+        music_idx = num_uniq_videos + 1
+        filter_complex += f"[{music_idx}:a]volume=0.10,aloop=loop=-1:size=2e+09[bgm];"
         
         # 3. MIXAGEM DE SFX (SE HOUVER)
         sfx_nodes = []
         current_time_ms = 0
         for i, sfx_p in enumerate(sfx_paths):
             if sfx_p and os.path.exists(sfx_p):
-                sfx_idx = len(video_paths) + 2 + len(sfx_nodes)
+                uniq_sfx_idx = sfx_path_to_uniq_idx[sfx_paths_original[i]]
+                sfx_idx = sfx_start_idx + uniq_sfx_idx
                 # Atrasa o SFX para começar no início da cena
                 filter_complex += f"[{sfx_idx}:a]adelay={int(current_time_ms)}|{int(current_time_ms)},volume=0.3[sfx{i}];"
                 sfx_nodes.append(f"[sfx{i}]")
@@ -725,8 +1011,8 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
         # Fallback para o arquivo local se a busca falhar
         bg_music_fallback = get_resource_path("channel_setup/assets/audio/background_suspense.mp3")
         if os.path.exists(bg_music_fallback):
-            music_idx = len(video_paths) + 1
-            filter_complex += f"[{music_idx}:a]volume=0.12,aloop=loop=-1:size=2e+09[bgm];"
+            music_idx = num_uniq_videos + 1
+            filter_complex += f"[{music_idx}:a]volume=0.10,aloop=loop=-1:size=2e+09[bgm];"
             filter_complex += "[voice][bgm]amix=inputs=2:duration=first[a_final]"
         else:
             filter_complex += "[voice]copy[a_final]"
@@ -734,12 +1020,14 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     with open(filter_script_path, "w", encoding="utf-8") as f:
         f.write(filter_complex)
 
-    args_long = ["ffmpeg", "-i", audio_path]
-    for p, dur in zip(video_paths, clip_durations):
-        if p.lower().endswith(('.jpg', '.jpeg', '.png')):
-            args_long.extend(["-loop", "1", "-framerate", "30", "-t", str(dur), "-i", p])
+    args_long = [ffmpeg_exe, "-i", audio_path]
+    for idx, p in enumerate(unique_short_video_paths):
+        orig_p = unique_video_paths[idx]
+        is_image = orig_p.lower().endswith(('.jpg', '.jpeg', '.png'))
+        if is_image:
+            args_long.extend(["-loop", "1", "-framerate", "30", "-i", p])
         else:
-            args_long.extend(["-stream_loop", "-1", "-t", str(dur), "-i", p])
+            args_long.extend(["-stream_loop", "-1", "-i", p])
     
     # Adiciona a trilha sonora com loop infinito
     if has_music:
@@ -750,9 +1038,8 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             args_long.extend(["-stream_loop", "-1", "-i", bg_music_fallback])
 
     # Adiciona os arquivos de SFX aos inputs do FFmpeg
-    for sfx_p in sfx_paths:
-        if sfx_p and os.path.exists(sfx_p):
-            args_long.extend(["-i", sfx_p])
+    for p in unique_short_sfx_paths:
+        args_long.extend(["-i", p])
     
     # Adiciona Thumbnail como input para o Short Principal (overlay nos primeiros 0.5s)
     if is_short and thumb_path and os.path.exists(thumb_path):
@@ -771,10 +1058,12 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     ])
     
     print(f"🎬 [FFMPEG] Renderizando com CINEMATIC FX e ÁUDIO DINÂMICO...")
+    use_qsv = True
     res_long = subprocess.run(args_long, capture_output=True, text=True)
     
     if res_long.returncode != 0:
         print(f"⚠️ [QSV FAIL] Tentando fallback para CPU (libx264)...")
+        use_qsv = False
         args_long_cpu = args_long.copy()
         # Substitui encoder QSV por Software
         idx_cv = args_long_cpu.index("-c:v")
@@ -788,7 +1077,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
         res_long = subprocess.run(args_long_cpu, capture_output=True, text=True)
         if res_long.returncode != 0:
             print(f"❌ [FFMPEG CRITICAL ERROR]\n{res_long.stderr}")
-            return False
+            cleanup(); return False
 
     if not is_short:
         print("📱 [SHORTS] Gerando 3 Shorts virais de 59 segundos...")
@@ -806,6 +1095,9 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             short_thumb_path = short_thumb_res.get("selected_thumbnail", {}).get("path")
         except Exception as e:
             print(f"⚠️ [SHORTS] Erro ao gerar thumb: {e}")
+
+        encoder = "h264_qsv" if use_qsv else "libx264"
+        pix_fmt = "nv12" if use_qsv else "yuv420p"
 
         for i in range(1, 4):
             # [NOVO] Thumbnail Única para cada Short
@@ -826,34 +1118,77 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             start_time = (i - 1) * 65  # Short 1 = 0s, Short 2 = 65s, Short 3 = 130s
             
             # Filtro dos Shorts (com legendas burn-in e injeção de Thumbnail nos primeiros 0.5s)
-            # Filtro dos Shorts (com legendas burn-in e injeção de Thumbnail nos primeiros 0.5s)
             if current_short_thumb and os.path.exists(current_short_thumb):
                 filter_shorts = f"[0:v]split=2[bg_in][fg_in];[bg_in]scale=720:1280,boxblur=20:10,setsar=1[bg];[fg_in]scale=720:-2,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base];[base]subtitles='{safe_srt}':force_style='Alignment=2,FontSize=12,Outline=1,Shadow=1,MarginV=90,PrimaryColour=&H00FFFF&'[withsubs];[1:v]scale=720:1280,setsar=1[thumb];[withsubs][thumb]overlay=0:0:enable='between(t,0,0.5)',setdar=9/16[outv]"
                 args_shorts = [
                     ffmpeg_exe, "-ss", str(start_time), "-i", output_long, "-loop", "1", "-i", current_short_thumb, "-filter_complex", filter_shorts,
-                    "-map", "[outv]", "-map", "0:a", "-c:v", "h264_qsv", "-preset", "veryfast", "-pix_fmt", "nv12",
+                    "-map", "[outv]", "-map", "0:a", "-c:v", encoder, "-preset", "veryfast", "-pix_fmt", pix_fmt,
                     "-aspect", "9:16", "-t", "59", "-c:a", "copy", out_short, "-y"
                 ]
             else:
                 filter_shorts = f"[0:v]split=2[bg_in][fg_in];[bg_in]scale=720:1280,boxblur=20:10,setsar=1[bg];[fg_in]scale=720:-2,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,setdar=9/16,subtitles='{safe_srt}':force_style='Alignment=2,FontSize=12,Outline=1,Shadow=1,MarginV=90,PrimaryColour=&H00FFFF&'[outv]"
                 args_shorts = [
                     ffmpeg_exe, "-ss", str(start_time), "-i", output_long, "-filter_complex", filter_shorts,
-                    "-map", "[outv]", "-map", "0:a", "-c:v", "h264_qsv", "-preset", "veryfast", "-pix_fmt", "nv12",
+                    "-map", "[outv]", "-map", "0:a", "-c:v", encoder, "-preset", "veryfast", "-pix_fmt", pix_fmt,
                     "-aspect", "9:16", "-t", "59", "-c:a", "copy", out_short, "-y"
                 ]
             
             res_shorts = subprocess.run(args_shorts, shell=False)
             if res_shorts.returncode != 0:
                 print(f"❌ [FFMPEG ERROR] Falha no Shorts {i}.")
-                return False
+                # Se falhar usando o encoder configurado, tenta um último fallback de emergência usando libx264
+                if encoder == "h264_qsv":
+                    print("⚠️ Tentando renderizar Short com software fallback (libx264)...")
+                    args_shorts_cpu = args_shorts.copy()
+                    idx_cv_sh = args_shorts_cpu.index("-c:v")
+                    args_shorts_cpu[idx_cv_sh+1] = "libx264"
+                    args_shorts_cpu[idx_cv_sh+4] = "yuv420p"
+                    res_shorts = subprocess.run(args_shorts_cpu, shell=False)
+                    if res_shorts.returncode == 0:
+                        print(f"✅ Short {i} recuperado via software fallback!")
+                        continue
+                cleanup(); return False
 
     try: os.remove(filter_script_path)
     except: pass
-    return True
+    cleanup(); return True
 
 # ==========================================
 # 5. RENDER E START
 # ==========================================
+
+def _apply_visual_cue_fx(base_visual_fx: str, cues: list, dur: float) -> str:
+    """
+    Maps visual_cues from the Retention Engine JSON to FFmpeg filter modifiers.
+    Called per-scene to inject dynamic micro-pacing into the filter_complex.
+    cues = [{"t": 0, "type": "zoom_in", "target": "...", "text": "..."}, ...]
+    """
+    if not cues or not isinstance(cues, list):
+        return base_visual_fx
+
+    # Classify the dominant cue type for this scene
+    cue_types = [c.get("type", "") for c in cues if isinstance(c, dict)]
+    dominant = cue_types[0] if cue_types else ""
+
+    fx_map = {
+        "zoom_in":      f"scale=w='min(iw*1.25,4000)':h=-1,zoompan=z='min(zoom+0.003,1.4)':d={int(dur*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+        "zoom_out":     f"scale=w='min(iw*1.3,4000)':h=-1,zoompan=z='max(zoom-0.003,1.0)':d={int(dur*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+        "glitch":       "hue=h='sin(2*PI*t)*30':s='1+0.3*sin(2*PI*t*3)',noise=alls=15:allf=t",
+        "slow_motion":  f"setpts=1.5*PTS,fps=30,trim=duration={dur}",
+        "freeze_frame": f"trim=end_frame=1,setpts=PTS*{int(dur*30)},fps=30,trim=duration={dur}",
+        "split_screen": "",   # handled at assembly level, skip here
+        "cut":          "",   # just a cut, no filter modifier
+        "graph_reveal": "eq=contrast=1.15:saturation=1.2",
+        "text_overlay": "",   # text is handled by PIL, not FFmpeg filter
+        "highlight_circle": "eq=brightness=0.05:contrast=1.1",
+    }
+
+    modifier = fx_map.get(dominant, "")
+    if modifier and modifier not in base_visual_fx:
+        return base_visual_fx + "," + modifier
+
+    return base_visual_fx
+
 
 def render_video(job_data):
     job_id = job_data.get("job_id")
@@ -865,9 +1200,9 @@ def render_video(job_data):
     
     try:
         audio_path = os.path.join(OUTPUT_DIR, f"audio_{job_id}.mp3")
-        VOICE_MAP = {"en-US": "en-US-GuyNeural", "pt-BR": "pt-BR-AntonioNeural", "es-ES": "es-ES-AlvaroNeural", "fr-FR": "fr-FR-HenriNeural", "de-DE": "de-DE-KillianNeural"}
+        VOICE_MAP = {"en-US": "en-US-GuyNeural", "pt-BR": "pt-BR-AntonioNeural", "es-ES": "es-ES-AlvaroNeural", "fr-FR": "fr-FR-HenriNeural", "de-DE": "de-DE-ConradNeural"}
         voice_id = VOICE_MAP.get(job_data.get("language", "en-US"), VOICE_DEFAULT)
-        run_voice_gen(script_text, audio_path, voice=voice_id)
+        generate_voice_master(script_text, audio_path, voice=voice_id, language=job_data.get("language", "en-US"), job_data=job_data)
 
         srt_path = generate_subtitles_locally(audio_path, job_id)
         if not srt_path: return False
@@ -876,9 +1211,34 @@ def render_video(job_data):
         clip_durations = []
         scenes_list = script_obj.get("scenes", [])
         
+        # Extract per-scene visual_cues from Retention Engine output for micro-pacing
+        scene_visual_cues = []
+        for s in scenes_list:
+            cues = s.get("visual_cues") or s.get("micro_cues") or []
+            scene_visual_cues.append(cues if isinstance(cues, list) else [])
+        
         from pysubs2 import load
         subs = load(srt_path)
-        total_audio_sec = subs[-1].end / 1000.0 if len(subs) > 0 else 60
+        
+        # Obter a duração real do áudio usando o FFmpeg para evitar cortes prematuros
+        def get_audio_duration_via_ffmpeg(path):
+            import subprocess
+            import re
+            try:
+                res = subprocess.run([ffmpeg_exe, "-i", path], capture_output=True, text=True)
+                match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", res.stderr)
+                if match:
+                    hours, minutes, seconds = match.groups()
+                    dur = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+                    print(f"🎵 [AUDIO DURATION] Duração real detectada: {dur:.2f}s")
+                    return dur
+            except Exception as e:
+                print(f"⚠️ Erro ao obter duração do áudio: {e}")
+            return 60.0
+
+        real_audio_dur = get_audio_duration_via_ffmpeg(audio_path)
+        last_sub_end = (subs[-1].end / 1000.0) + 1.5 if len(subs) > 0 else 0
+        total_audio_sec = max(real_audio_dur, last_sub_end)
 
         print(f"🎬 [Worker] Sincronizando {len(scenes_list)} cenas...")
         if len(scenes_list) == 0:
@@ -895,7 +1255,7 @@ def render_video(job_data):
             # Isso garante que o hook tenha visuais impactantes, não cache genérico
             is_hook = (scene_index < 3 and not job_data.get("is_short", False))
             if is_hook:
-                import re, glob, hashlib
+                import re, glob
                 clean_kw = re.sub(r'[^\w\s]', '', visual_kw.lower())
                 words = [w for w in clean_kw.split() if w not in {"a","an","the","and","or","of","with","in","on","at"}]
                 api_query = " ".join(words[:4]) if words else visual_kw
@@ -920,12 +1280,22 @@ def render_video(job_data):
 
         downloaded_paths = [a[0] for a in downloaded_assets_list]
         sfx_paths = [a[1] for a in downloaded_assets_list]
+        # Injeção Inteligente de SFX de transição para evitar silêncios pós-transições
+        for idx in range(len(sfx_paths)):
+            if sfx_paths[idx] is None:
+                scene_text = str(scenes_list[idx].get("narration") or "").lower()
+                is_transition_word = any(w in scene_text for w in ["mais", "criação", "entretanto", "porém", "mais voici", "cependant", "toutefois", "but", "however", "yet"])
+                if idx % 6 == 0 or is_transition_word:
+                    try:
+                        sfx_paths[idx] = fetch_sfx("whoosh")
+                        print(f"🎵 [SFX AUTO-INJECT] Injetando SFX 'whoosh' na cena {idx} para transição fluida.")
+                    except Exception as e:
+                        print(f"⚠️ Falha ao auto-injetar SFX whoosh: {e}")
 
         for i, (scene, p) in enumerate(zip(scenes_list, downloaded_paths)):
             if not p:
                 print(f"🚨 [ERRO] Falha na cena {i}. Injetando fallback visual para manter duração.")
-                # Tenta gerar um quadro de emergência para esta palavra-chave específica
-                p = generate_emergency_frame(scene.get("b_roll_visual", topic))
+                p = get_resource_path("channel_setup/assets/visuals/fallback_static.jpg")
             
             if not p or not os.path.exists(p):
                 # Fallback absoluto (estático pré-existente)
@@ -998,6 +1368,27 @@ def render_video(job_data):
         ratio = total_audio_sec / sum(clip_durations)
         clip_durations = [d * ratio for d in clip_durations]
 
+        # Pacing Dinâmico: Corte estrito de 4.5s
+        new_cenas = []
+        new_durations = []
+        new_sfx = []
+        MAX_DUR = 4.5
+        for c, d, sfx in zip(cenas, clip_durations, sfx_paths + [None]*(max(0, len(cenas)-len(sfx_paths)))):
+            while d > MAX_DUR:
+                new_cenas.append(c)
+                new_durations.append(MAX_DUR)
+                new_sfx.append(sfx)
+                sfx = None  # Toca o sfx apenas na primeira parte do corte
+                d -= MAX_DUR
+            if d > 0:
+                new_cenas.append(c)
+                new_durations.append(d)
+                new_sfx.append(sfx)
+        
+        cenas = new_cenas
+        clip_durations = new_durations
+        sfx_paths = new_sfx
+
         # 1. RENDERIZAÇÃO
         mood = script_obj.get("music_mood", "suspense")
         
@@ -1018,12 +1409,17 @@ def render_video(job_data):
             except Exception as e:
                 print(f"   ⚠️ Thumb do Short Principal não gerada: {e}")
         
+        # Inject visual cues into job_data so assemble_production can read them
+        # scene_visual_cues is aligned with cenas[] after pacing/dedup expansion
+        job_data["_scene_visual_cues"] = scene_visual_cues
+
         if not assemble_production(
             job_id, cenas, audio_path, srt_path, topic, clip_durations, total_audio_sec,
             job_data=job_data,
             is_short=is_short_job, music_mood=mood, sfx_paths=sfx_paths,
             thumb_path=short_thumb_path
         ): return False
+
 
 
         # 2. DEFINIÇÃO DA ESTRUTURA DE PASTAS (DATA / PAÍS)
@@ -1226,7 +1622,8 @@ def start_worker():
                     channel = session.exec(select(Channel).where(Channel.active == True)).first()
                     if channel:
                         scout = ViralScout()
-                        trends = scout.get_viral_videos(niche=channel.niche, days=30)
+                        region = channel.market_region or "US"
+                        trends = scout.get_viral_videos(niche=channel.niche, region=region, days=7)
                         
                         # Cria os jobs faltantes
                         needed = DAILY_TARGET - long_count
@@ -1258,7 +1655,7 @@ def start_worker():
                         time.sleep(cooldown)
 
             elif response.status_code == 404:
-                print(f"[{time.strftime('%H:%M:%S')}] 😴 Sem tarefas. Quota atual: {current_quota}/{MAX_DAILY_VIDEOS}")
+                print(f"[{time.strftime('%H:%M:%S')}] 😴 Sem tarefas. Quota atual: {get_daily_quota()}/{MAX_DAILY_VIDEOS}")
         except Exception as e:
             print(f"⚠️ Erro: {e}")
         time.sleep(20)

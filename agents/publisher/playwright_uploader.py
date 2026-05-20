@@ -243,40 +243,81 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             if srt_path and os.path.exists(srt_path) and not is_short:
                 try:
                     print("📝 [PLAYWRIGHT] Fazendo upload do arquivo de Legendas (SRT)...")
-                    # Tenta clicar no botão de Adicionar Legendas na aba de Elementos
-                    srt_row = page.locator("ytcp-video-elements-row").filter(has_text=re.compile(r"legendas|subtitles", re.IGNORECASE)).first
-                    if srt_row.is_visible():
-                        upload_btn = srt_row.locator("#add-button, #edit-button").first
-                        if upload_btn.is_visible():
-                            upload_btn.click(force=True)
-                            time.sleep(2)
-                            
-                            # Clica em "Fazer upload de arquivo"
-                            page.locator("ytcp-button").filter(has_text=re.compile(r"fazer upload|upload file", re.IGNORECASE)).first.click(force=True)
-                            time.sleep(1)
-                            # Clica em "Continuar" no aviso de timing
-                            page.locator("ytcp-button#continue-button").first.click(force=True)
-                            
-                            with page.expect_file_chooser() as fc_info:
-                                page.locator("input[type='file']").first.click(force=True)
-                            file_chooser = fc_info.value
-                            file_chooser.set_files(srt_path)
-                            time.sleep(3)
-                            
-                            # Salva/Conclui
-                            page.locator("ytcp-button#done-button, #save-button").first.click(force=True)
-                            print("✅ [PLAYWRIGHT] Legendas SRT anexadas!")
-                            time.sleep(2)
-                        else:
-                            print("⚠️ [PLAYWRIGHT] Botão de upload de SRT não disponível.")
+                    
+                    # Aguarda a aba de Elementos carregar completamente antes de procurar o botão de SRT
+                    # O timeout do End Screen esgota antes e pode deixar a página em estado parcial
+                    try:
+                        page.wait_for_selector("ytcp-video-elements-row", timeout=15000)
+                        time.sleep(2)
+                    except:
+                        print("   ⚠️ [SRT] Aba de Elementos ainda carregando, aguardando...")
+                        time.sleep(4)
+
+                    # Estratégia 1: Clica no botão da linha de legendas via DOM
+                    srt_uploaded = False
+                    try:
+                        srt_row = page.locator("ytcp-video-elements-row").filter(has_text=re.compile(r"legendas|subtitles|captions|sous-titres|untertitel|subtítulos", re.IGNORECASE)).first
+                        if srt_row.is_visible(timeout=8000):
+                            upload_btn = srt_row.locator("#add-button, #edit-button").first
+                            if upload_btn.is_visible(timeout=5000):
+                                upload_btn.click(force=True)
+                                time.sleep(2)
+                                
+                                # Clica em "Fazer upload de arquivo"
+                                page.locator("ytcp-button").filter(has_text=re.compile(r"fazer upload|upload file|charger un fichier|Datei hochladen|subir archivo", re.IGNORECASE)).first.click(force=True)
+                                time.sleep(1)
+                                
+                                # Clica em "Continuar" no aviso de timing (se aparecer)
+                                try:
+                                    cont_btn = page.locator("ytcp-button#continue-button").first
+                                    if cont_btn.is_visible(timeout=3000):
+                                        cont_btn.click(force=True)
+                                        time.sleep(1)
+                                except: pass
+                                
+                                # Usa file_chooser para enviar o arquivo SRT
+                                with page.expect_file_chooser(timeout=10000) as fc_info:
+                                    page.locator("input[type='file']").first.click(force=True)
+                                file_chooser = fc_info.value
+                                file_chooser.set_files(srt_path)
+                                time.sleep(3)
+                                
+                                # Salva/Conclui
+                                try:
+                                    page.locator("ytcp-button#done-button, #save-button").first.click(force=True)
+                                except:
+                                    page.keyboard.press("Enter")
+                                time.sleep(2)
+                                print("✅ [PLAYWRIGHT] Legendas SRT anexadas com sucesso!")
+                                srt_uploaded = True
+                    except Exception as e1:
+                        print(f"   ⚠️ [SRT] Estratégia DOM falhou: {e1}")
+
+                    # Estratégia 2 (Fallback JS): Injeta o arquivo diretamente no input oculto de upload de legendas
+                    if not srt_uploaded:
+                        try:
+                            print("   🔄 [SRT] Tentando injeção JS direta no input de legendas...")
+                            # O YouTube Studio tem um input file oculto específico para SRT
+                            srt_input = page.locator("input[accept='.srt,.vtt,.sbv,.sub,.txt,.ttml,.xml']").first
+                            if srt_input.count() > 0:
+                                srt_input.set_input_files(srt_path)
+                                time.sleep(3)
+                                print("✅ [PLAYWRIGHT] Legendas injetadas via input direto!")
+                                srt_uploaded = True
+                        except Exception as e2:
+                            print(f"   ⚠️ [SRT] Injeção JS também falhou: {e2}")
+                    
+                    if not srt_uploaded:
+                        print("   ⚠️ [SRT] Legenda não enviada neste upload. Será necessário adicionar manualmente no YouTube Studio.")
+                        
                 except Exception as e:
                     print(f"⚠️ [PLAYWRIGHT] Erro isolado no upload do SRT: {e}")
-                    # FUNDAMENTAL: Fecha qualquer modal aberto que impediria os cliques futuros
                     page.keyboard.press("Escape")
                     time.sleep(1)
                     page.keyboard.press("Escape")
                     try: page.locator("ytcp-icon-button#close-button").first.click(timeout=2000, force=True)
                     except: pass
+
             
             # Quiz / Enquete (apenas para vídeos LONGOS)
             if quiz_data and isinstance(quiz_data, dict) and not is_short:
@@ -383,11 +424,14 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             # Avança até a aba de Visibilidade (Adaptativo para Monetização, Shorts e Longos)
             print("⏭️ [PLAYWRIGHT] Avançando para a aba Visibilidade (Agendamento)...")
             for step_attempt in range(10):
-                # Critério de parada: o botão 'Done' está visível = estamos na última aba (visibilidade)
-                done_check = page.locator("ytcp-button#done-button, ytcp-button#publish-button").first
-                vis_check  = page.locator("ytcp-visibility-radios, ytcp-video-visibility, #visibility-stepper, #step-badge-3").first
+                # Critério de parada: o botão 'Next' não está mais disponível ou estamos explicitamente na última aba
+                next_btn = page.locator("ytcp-button#next-button").first
+                vis_check  = page.locator("ytcp-visibility-radios, ytcp-video-visibility").first
                 
-                if done_check.is_visible() or (vis_check.is_visible() and step_attempt > 2):
+                if (not next_btn.is_visible() or next_btn.get_attribute("disabled") is not None or next_btn.get_attribute("aria-disabled") == "true") and vis_check.is_visible():
+                    break
+                
+                if not next_btn.is_visible() and step_attempt > 2:
                     break
                 
                 # Libera focos ou modais travados
@@ -501,7 +545,13 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
                     date_input.click()
                     page.keyboard.press("Control+A")
                     page.keyboard.press("Backspace")
-                    date_str = scheduled_at.strftime("%d/%m/%Y") if "pt" in (channel.language or "").lower() else scheduled_at.strftime("%b %d, %Y")
+                    lang_code = (channel_identifier or "en-US").lower()
+                    if "pt" in lang_code or "es" in lang_code or "fr" in lang_code:
+                        date_str = scheduled_at.strftime("%d/%m/%Y")
+                    elif "de" in lang_code:
+                        date_str = scheduled_at.strftime("%d.%m.%Y")
+                    else:
+                        date_str = scheduled_at.strftime("%b %d, %Y")
                     page.keyboard.insert_text(date_str)
                     page.keyboard.press("Enter")
                     time.sleep(1)
@@ -534,17 +584,36 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             
             # Clica em Publicar/Agendar (Done Button)
             print("🚀 [PLAYWRIGHT] Finalizando Publicação!")
-            # O botão final de agendamento costuma ter o ID 'done-button'
-            done_btn = page.locator("ytcp-button#done-button").first
+            done_btn = page.locator("ytcp-button#done-button, ytcp-button#publish-button").first
             
-            # Espera o botão estar habilitado (importante se as verificações ainda estiverem rodando)
-            for _ in range(15):
-                if done_btn.is_enabled():
-                    break
-                print("⏳ [PLAYWRIGHT] Aguardando botão de conclusão ser habilitado...")
-                time.sleep(3)
-            
-            done_btn.click(force=True)
+            # Tenta clicar via JS para evitar problemas de visibilidade ou animações bloqueantes
+            try:
+                for _ in range(15):
+                    clicked = page.evaluate("""
+                        () => {
+                            const btns = document.querySelectorAll('ytcp-button#done-button, ytcp-button#publish-button');
+                            for (const b of btns) {
+                                if (b.offsetWidth > 0 && !b.hasAttribute('disabled') && !b.hasAttribute('hidden') && b.getAttribute('aria-disabled') !== 'true') {
+                                    b.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                    """)
+                    if clicked:
+                        print("✅ [PLAYWRIGHT] Botão de Conclusão clicado com sucesso via JS.")
+                        break
+                    print("⏳ [PLAYWRIGHT] Aguardando botão de conclusão ser habilitado...")
+                    time.sleep(3)
+                
+                # Fallback se JS falhar
+                if not clicked:
+                    done_btn.click(force=True)
+            except Exception as e:
+                print(f"⚠️ Erro ao clicar Done via JS: {e}")
+                try: done_btn.click(force=True)
+                except: pass
             
             # Aguarda upload concluir (O YouTube pode demorar para exibir o diálogo final)
             print("⏳ [PLAYWRIGHT] Aguardando confirmação final do YouTube...")

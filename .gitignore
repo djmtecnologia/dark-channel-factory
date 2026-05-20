@@ -55,3 +55,5 @@ playwright_error_*.png
 
 *.zip
 *.pt
+*.pth
+*.bin

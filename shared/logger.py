@@ -19,6 +19,15 @@ _configured = False
 
 def setup_logging(log_level: str | None = None) -> None:
     """Configura logging global. Chame uma vez no entry point."""
+    import sys
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding='utf-8')
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
     global _configured
     if _configured:
         return

@@ -247,6 +247,29 @@ def check_and_download_dependencies() -> dict:
     # 3. Whisper
     whisper_root = _ensure_whisper_model()
 
+    # 3.5 TTS e PyTorch (Voz Premium XTTSv2)
+    def _ensure_tts_dependencies():
+        # [NEW] Check for legacy venv bridge to avoid installing broken TTS on Python 3.13
+        venv_bridge = os.path.join("venv_clonagem", "Scripts", "python.exe")
+        if os.path.exists(venv_bridge):
+            print("[Bootstrapper] 🌉 Ponte 'venv_clonagem' detectada. O XTTSv2 será executado isoladamente.")
+            return
+
+        try:
+            import TTS
+            print("[Bootstrapper] ✅ Dependências do XTTSv2 (TTS) já instaladas.")
+        except ImportError:
+            print("[Bootstrapper] 🧠 Instalando bibliotecas premium do XTTSv2 (Isso pode demorar)...")
+            import subprocess
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "TTS", "torch", "torchvision", "torchaudio", "numpy<2.0.0"])
+                print("[Bootstrapper] ✅ XTTSv2 instalado com sucesso!")
+            except Exception as e:
+                print(f"[Bootstrapper] ⚠️ Erro ao instalar TTS: O seu Python atual pode não suportar a biblioteca TTS oficial.")
+                print("[Bootstrapper] ℹ️ A clonagem premium tentará usar Edge-TTS ou ElevenLabs.")
+                
+    _ensure_tts_dependencies()
+
     # 4. PATH
     _inject_bin_path()
 

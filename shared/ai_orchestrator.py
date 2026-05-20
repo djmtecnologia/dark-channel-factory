@@ -37,11 +37,11 @@ class AIOrchestrator:
         }
         self.circuit_break_time = 300  # 5 minutos de cooldown após erro grave
 
-        # Carrega modelos das ENVs
-        self.primary_model = os.getenv("LLM_PRIMARY_MODEL", "gemini-1.5-flash")
-        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-        self.openai_model = os.getenv("LLM_FINAL_FALLBACK_MODEL", "gpt-4o-mini")
-        self.or_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku")
+        # Carrega modelos das ENVs e limpa espaços/quebras de linha do Windows
+        self.primary_model = os.getenv("LLM_PRIMARY_MODEL", "gemini-3.5-flash").strip()
+        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+        self.openai_model = os.getenv("LLM_FINAL_FALLBACK_MODEL", "gpt-4o-mini").strip()
+        self.or_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku").strip()
 
         # Inicialização dos Clientes
         self._init_clients()
@@ -49,17 +49,25 @@ class AIOrchestrator:
     def _init_clients(self):
         # Gemini (REST)
         self.gemini_key = os.getenv("GEMINI_API_KEY")
+        if self.gemini_key:
+            self.gemini_key = self.gemini_key.strip()
         
-        # OpenAI (Com max_retries=0 para evitar travamento em cascata quando não há saldo)
+        # OpenAI
         self.openai_key = os.getenv("OPENAI_API_KEY")
+        if self.openai_key:
+            self.openai_key = self.openai_key.strip()
         self.openai_client = OpenAI(api_key=self.openai_key, max_retries=0) if self.openai_key else None
         
-        # Groq (Excelente Tier Gratuito e Ultra-Rápido)
+        # Groq
         self.groq_key = os.getenv("GROQ_API_KEY")
+        if self.groq_key:
+            self.groq_key = self.groq_key.strip()
         self.groq_client = OpenAI(api_key=self.groq_key, base_url="https://api.groq.com/openai/v1", max_retries=0) if self.groq_key else None
         
-        # OpenRouter (OpenAI Compatible)
+        # OpenRouter
         self.or_key = os.getenv("OPENROUTER_API_KEY")
+        if self.or_key:
+            self.or_key = self.or_key.strip()
         self.or_client = OpenAI(
             api_key=self.or_key, 
             base_url="https://openrouter.ai/api/v1",
@@ -67,12 +75,16 @@ class AIOrchestrator:
             default_headers={"HTTP-Referer": "https://dark-channel-factory.local", "X-Title": "Dark Channel Factory"}
         ) if self.or_key else None
 
-        # DeepSeek Nativo (OpenAI Compatible)
+        # DeepSeek Nativo
         self.deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if self.deepseek_key:
+            self.deepseek_key = self.deepseek_key.strip()
         self.deepseek_client = OpenAI(api_key=self.deepseek_key, base_url="https://api.deepseek.com/v1", max_retries=0) if self.deepseek_key else None
 
-        # Mistral (OpenAI Compatible)
+        # Mistral
         self.mistral_key = os.getenv("MISTRAL_API_KEY")
+        if self.mistral_key:
+            self.mistral_key = self.mistral_key.strip()
         self.mistral_client = OpenAI(api_key=self.mistral_key, base_url="https://api.mistral.ai/v1", max_retries=0) if self.mistral_key else None
 
     def _is_provider_available(self, provider_id: str) -> bool:
@@ -160,34 +172,86 @@ class AIOrchestrator:
         
         return text
 
-    def chat_completion(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> LLMResponse:
+    def chat_completion(self, system_prompt: str, user_prompt: str, json_mode: bool = False, max_tokens: int = 8192) -> LLMResponse:
         """
-        Executa a chamada LLM com fallback automático seguindo a Tier List.
+        Executa a chamada LLM com fallback automático seguindo a Tier List e Cache de Custo-Zero.
         """
+        import hashlib
+        import json
         
-        # TIER 1: Gemini 1.5 Flash
+        # Otimização de Custos: Cache Agressivo
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets_cache", "llm_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        prompt_hash = hashlib.md5((system_prompt + user_prompt).encode()).hexdigest()
+        cache_file = os.path.join(cache_dir, f"{prompt_hash}.json")
+        
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                logger.info("⚡ [CACHE SEMÂNTICO] Retornando roteiro do cache (Custo Zero)!")
+                return LLMResponse(cached_data["text"], "Cache", "semantic-cache")
+            except: pass
+
+        def save_to_cache(text: str):
+            try:
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump({"text": text}, f, ensure_ascii=False)
+            except: pass
+
+        # TIER 1: Gemini 3.5 Flash (Primário) → Gemini 2.5 Flash (Fallback)
+        GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
         if self._is_provider_available("gemini") and self.gemini_key:
             try:
-                resp = self._call_gemini(self.primary_model, system_prompt, user_prompt, json_mode)
+                resp = self._call_gemini(self.primary_model, system_prompt, user_prompt, json_mode, max_tokens)
                 if json_mode: resp.text = self._clean_json(resp.text)
+                save_to_cache(resp.text)
                 return resp
             except Exception as e:
                 err_str = str(e).lower()
+                # Se o modelo primário retornou 404, tenta um modelo diferente como fallback
+                if ("404" in err_str or "not found" in err_str) and self.primary_model != GEMINI_FALLBACK_MODEL:
+                    logger.warning(f"⚠️ Gemini model '{self.primary_model}' returned 404. Trying fallback '{GEMINI_FALLBACK_MODEL}'...")
+                    try:
+                        resp = self._call_gemini(GEMINI_FALLBACK_MODEL, system_prompt, user_prompt, json_mode, max_tokens)
+                        if json_mode: resp.text = self._clean_json(resp.text)
+                        save_to_cache(resp.text)
+                        return resp
+                    except Exception as e2:
+                        err_str = str(e2).lower()
+                        e = e2  # Usa o erro do fallback para o log
+                
                 is_rate_limit = "429" in err_str or "rate limit" in err_str or "quota exceeded" in err_str
                 is_quota = "insufficient_quota" in err_str or "402" in err_str
                 self._mark_failure("gemini", str(e), is_quota=is_quota, is_rate_limit=is_rate_limit)
                 if is_rate_limit: time.sleep(1)
 
         # TIER 2: Groq (Llama 3 70B - Excelente cota gratuita e ultra-rápido)
+        # NOTA: Groq tem limite de 6000 tokens de output por request para llama-3.3-70b
+        groq_max_tokens = min(max_tokens, 6000)
         if self._is_provider_available("groq") and self.groq_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.groq_client, self.groq_model, "Groq", system_prompt, user_prompt, json_mode
+                    self.groq_client, self.groq_model, "Groq", system_prompt, user_prompt, json_mode, groq_max_tokens
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
+                save_to_cache(resp.text)
                 return resp
             except Exception as e:
                 err_str = str(e).lower()
+                # 413 = payload muito grande → tenta com modelo mais leve
+                if "413" in err_str or "too large" in err_str or "payload" in err_str:
+                    logger.warning("⚠️ Groq 413: Payload muito grande. Tentando com llama-3.1-8b-instant...")
+                    try:
+                        resp = self._call_openai_compatible(
+                            self.groq_client, "llama-3.1-8b-instant", "Groq-8B", system_prompt, user_prompt, json_mode, 4000
+                        )
+                        if json_mode: resp.text = self._clean_json(resp.text)
+                        save_to_cache(resp.text)
+                        return resp
+                    except Exception as e2:
+                        err_str = str(e2).lower()
+                        e = e2
                 is_rate_limit = "429" in err_str or "rate_limit" in err_str
                 is_quota = "insufficient_quota" in err_str or "402" in err_str or "credits" in err_str
                 self._mark_failure("groq", str(e), is_quota=is_quota, is_rate_limit=is_rate_limit)
@@ -197,9 +261,10 @@ class AIOrchestrator:
         if self._is_provider_available("openai") and self.openai_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.openai_client, self.openai_model, "OpenAI", system_prompt, user_prompt, json_mode
+                    self.openai_client, self.openai_model, "OpenAI", system_prompt, user_prompt, json_mode, max_tokens
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
+                save_to_cache(resp.text)
                 return resp
             except Exception as e:
                 err_str = str(e).lower()
@@ -212,9 +277,10 @@ class AIOrchestrator:
         if self._is_provider_available("openrouter") and self.or_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.or_client, self.or_model, "OpenRouter", system_prompt, user_prompt, json_mode
+                    self.or_client, self.or_model, "OpenRouter", system_prompt, user_prompt, json_mode, max_tokens
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
+                save_to_cache(resp.text)
                 return resp
             except Exception as e:
                 is_quota = "402" in str(e) or "429" in str(e) or "credits" in str(e).lower()
@@ -224,9 +290,10 @@ class AIOrchestrator:
         if self._is_provider_available("deepseek") and self.deepseek_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.deepseek_client, "deepseek-chat", "DeepSeek", system_prompt, user_prompt, json_mode
+                    self.deepseek_client, "deepseek-chat", "DeepSeek", system_prompt, user_prompt, json_mode, max_tokens
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
+                save_to_cache(resp.text)
                 return resp
             except Exception as e:
                 is_quota = "402" in str(e) or "Insufficient Balance" in str(e)
@@ -236,7 +303,7 @@ class AIOrchestrator:
         if self._is_provider_available("mistral") and self.mistral_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.mistral_client, "mistral-small-latest", "MistralAI", system_prompt, user_prompt, json_mode
+                    self.mistral_client, "mistral-small-latest", "MistralAI", system_prompt, user_prompt, json_mode, max_tokens
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
                 return resp
@@ -246,7 +313,7 @@ class AIOrchestrator:
 
         raise RuntimeError("CRITICAL ERROR: Todos os provedores de LLM falharam ou estão offline.")
 
-    def _call_gemini(self, model: str, system: str, user: str, json_mode: bool) -> LLMResponse:
+    def _call_gemini(self, model: str, system: str, user: str, json_mode: bool, max_tokens: int) -> LLMResponse:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_key}"
         
         full_prompt = f"SYSTEM: {system}\n\nUSER: {user}"
@@ -255,7 +322,7 @@ class AIOrchestrator:
 
         payload = {
             "contents": [{"parts": [{"text": full_prompt}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192}
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": max_tokens}
         }
         
         response = requests.post(url, json=payload, timeout=30)
@@ -271,7 +338,7 @@ class AIOrchestrator:
         logger.info(f"✅ Gemini Success: {model}")
         return LLMResponse(text, "Gemini", model, tokens)
 
-    def _call_openai_compatible(self, client: OpenAI, model: str, provider: str, system: str, user: str, json_mode: bool) -> LLMResponse:
+    def _call_openai_compatible(self, client: OpenAI, model: str, provider: str, system: str, user: str, json_mode: bool, max_tokens: int) -> LLMResponse:
         kwargs = {
             "model": model,
             "messages": [
@@ -279,7 +346,7 @@ class AIOrchestrator:
                 {"role": "user", "content": user}
             ],
             "temperature": 0.7,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens,
             "timeout": 90,  # 90s timeout to prevent hung requests
         }
         if json_mode:

@@ -43,7 +43,7 @@ Return ONLY valid JSON.
 """
 
 
-def run_content_validator_agent(script_data_dict: dict) -> ContentValidationResult:
+def run_content_validator_agent(script_data_dict: dict, save_db: bool = True, forward: bool = True) -> ContentValidationResult:
     """
     Executa o Content Validator Agent.
 
@@ -187,14 +187,16 @@ Return JSON:
     )
 
     if passed:
-        _forward_to_video_designer(script_data_dict)
+        if forward:
+            _forward_to_video_designer(script_data_dict)
     else:
         logger.warning(f"[Validator] Script REJECTED | issues: {all_issues}")
-        try:
-            from database.db_manager import fail_pipeline_job
-            fail_pipeline_job(str(job_id), f"Content validation failed: {'; '.join(all_issues[:3])}")
-        except Exception:
-            pass
+        if save_db:
+            try:
+                from database.db_manager import fail_pipeline_job
+                fail_pipeline_job(str(job_id), f"Content validation failed: {'; '.join(all_issues[:3])}")
+            except Exception:
+                pass
 
     return result
 

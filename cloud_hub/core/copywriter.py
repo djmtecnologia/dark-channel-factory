@@ -5,17 +5,158 @@ from cloud_hub.models import VideoJob, Channel, Tenant
 from cloud_hub.core.monetization import get_best_match_product, inject_tracking_link
 from shared.llm_client import get_completion
 from shared.ai_orchestrator import orchestrator
+from shared.retention_engine import build_retention_prompt
+from shared.script_validator import validate_and_fix_script
 from datetime import datetime, timezone
 
+def sanitize_script_glossary(script_data: dict) -> dict:
+    """
+    Sanitiza os textos do roteiro (narração, título, descrição) para garantir
+    a consistência perfeita dos termos e marcas inventadas pela IA, bem como
+    correção de anos (2016 -> 2026), remoção de repetições e conclusão de sentenças.
+    """
+    if not script_data:
+        return script_data
+    
+    # 1. Dicionário de Substituições de Termos e Erros de Coesão / Tradução
+    replacements = {
+        # MotoGP/Formula E Teams / Tools Fictícios (Espanhol, Francês e outros)
+        "Tecride": "Tekride",
+        "Treuder": "Tekride",
+        "Treider": "Tekride",
+        "Tecrdet": "Tekride",
+        "tekride": "Tekride",
+        "treuder": "Tekride",
+        "treider": "Tekride",
+        "tecrdet": "Tekride",
+        
+        # Race 26 Token Normalizações
+        "Ris 26": "Race26",
+        "Raza 26": "Race26",
+        "Raça 26": "Race26",
+        "Ascensión 26": "Race26",
+        "Ascension 26": "Race26",
+        "Race 26": "Race26",
+        "race 26": "Race26",
+        
+        # Plataformas Fictícias
+        "Raselinkai": "RaceLinkAI",
+        "RaselinkAI": "RaceLinkAI",
+        "Arrael Inkai": "RaceLinkAI",
+        "Arrael InkAI": "RaceLinkAI",
+        "Race Link AI": "RaceLinkAI",
+        "Array Link AI": "RaceLinkAI",
+        
+        # Correções de Termos Vulgares/Pouco Profissionais
+        "putao": "puntero",
+        "ritmo putao": "ritmo de punta",
+        "pentante punter": "puntero",
+        
+        # Algoritmos / Ferramentas de dados Fictícias
+        "Rasrix": "RaceMetrics",
+        "Racemetric": "RaceMetrics",
+        "Racemetrics": "RaceMetrics",
+        "racemetrics": "RaceMetrics",
+        "racemetric": "RaceMetrics",
+        
+        # Algoritmos Fictícios (França e outros)
+        "Rasspredict": "RacePredict",
+        "Rass Prédict": "RacePredict",
+        "Rass Predict": "RacePredict",
+        "Retrict": "RacePredict",
+        "Race Predict": "RacePredict",
+        "rasspredict": "RacePredict",
+        "retrict": "RacePredict",
+        "race predict": "RacePredict",
+        
+        # Outras inconsistências
+        "ridata s": "Ridata",
+        "ridatas": "Ridata",
+        "ridata's": "Ridata",
+        
+        # Verificação do Ritmo Visual e Estrutural (Meio do vídeo / Tutorial)
+        "en el mini tutorial de la mitad del vídeo": "a continuación en nuestro mini tutorial",
+        "en el mini tutorial de la mitad del video": "a continuación en nuestro mini tutorial",
+        "en el tutorial de la mitad del vídeo": "a continuación en nuestro tutorial",
+        "en el tutorial de la mitad del video": "a continuación en nuestro tutorial",
+        
+        # Consistência lógica na mecânica esportiva (Fórmula E - Attack Mode)
+        "cambio de neumáticos": "activación del Modo Ataque",
+        "cambio de neumaticos": "activación del Modo Ataque",
+        "entrar a boxes para cambiar neumáticos": "activar el Modo Ataque",
+        "entrar a boxes para cambiar neumaticos": "activar el Modo Ataque",
+        "entrar a boxes para una troca de pneus": "activar o Modo Ataque",
+        "cambiar neumáticos": "activar el Modo Ataque",
+        "cambiar neumaticos": "activar el Modo Ataque",
+        "cambiar los neumáticos": "activar el Modo Ataque",
+        "cambiar os pneus": "activar o Modo Ataque",
+        "troca de pneus": "ajustes de gerenciamento de energia",
+        "parada en boxes": "activación de Modo Ataque",
+        "paradas en boxes": "activaciones de Modo Ataque",
+        
+        # Correção de Perguntas Redundantes / Tag de Pergunta "no" em espanhol
+        "con éxito no Si": "con éxito? Si",
+        "con exito no Si": "con éxito? Si",
+        "con éxito, no? Si": "con éxito? Si",
+        "con exito, no? Si": "con éxito? Si",
+        "éxito no Si": "éxito? Si",
+        "exito no Si": "éxito? Si",
+        ", no? Si": "? Si",
+        "? no. Si": "? Si",
+        "? no Si": "? Si",
+        
+        # Correção Gramatical de Truncamento do Roteiro (Exemplos específicos e gerais)
+        "pour Mais voici": "pour cela. Mais voici",
+        "pour Mais": "pour isso. Mais",
+        "pour les contrats intelligents Mais": "pour les contrats intelligents. Mais",
+        
+        # Repetições de Valores do áudio (Pausas Narrativas Dramáticas)
+        "28 millions d'euros 28 millions": "28 millions d'euros. Je répète, 28 millions",
+        "28 millions d'euros 28 millions d'euros": "28 millions d'euros",
+        
+        # Correção Temporal de data (2016 -> 2026)
+        "dès 2016": "dès 2026",
+        "depuis 2016": "depuis 2026",
+        "en 2016": "en 2026",
+        "de 2016": "de 2026",
+    }
+    
+    def clean_text(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        return text
+
+    # Higieniza campos principais
+    if "title" in script_data and script_data["title"]:
+        script_data["title"] = clean_text(script_data["title"])
+    if "description" in script_data and script_data["description"]:
+        script_data["description"] = clean_text(script_data["description"])
+    if "script_full" in script_data and script_data["script_full"]:
+        script_data["script_full"] = clean_text(script_data["script_full"])
+        
+    # Higieniza cenas
+    scenes = script_data.get("scenes", [])
+    if isinstance(scenes, list):
+        for s in scenes:
+            if isinstance(s, dict):
+                for k in ["narration", "text", "texto", "content"]:
+                    if k in s and s[k]:
+                        s[k] = clean_text(s[k])
+                        
+    return script_data
+
+# Legacy system prompt kept for reference — replaced by shared.retention_engine.ELITE_SYSTEM_PROMPT
 SYSTEM_PROMPT = """
 You are a Senior Viral Video Director and Retention Engineering Architect (LEVEL 100/100).
-Your goal is to transform "AI Slop" into Premium, Cinematic, High-Authority Business Documentaries.
+Your goal is to transform \"AI Slop\" into Premium, Cinematic, High-Authority Business Documentaries.
 
 CORE DIRECTIVES:
 1. THE 0-5s RULE: Every video must start with a curiosity explosion. Shocking statements, extreme results, or conflict. NO intros.
 2. DOPAMINE PACING: Pattern interrupts every 5-10 seconds. Use visual zooms, motion graphics, and emotional sound transitions.
-3. STORYTELLING AS DISCOVERY: Frame content as a business experiment, high-stakes test, or futuristic discovery. 
-4. ELIMINATE AI-GENERICISM: No robotic pacing, no overused stock footage, no predictable editing. 
+3. STORYTELLING AS DISCOVERY: Frame content as a business experiment, high-stakes test, or futuristic discovery.
+4. ELIMINATE AI-GENERICISM: No robotic pacing, no overused stock footage, no predictable editing.
 5. CONTEXT 2026: The algorithm rewards human-directed, emotionally engineered content.
 """
 
@@ -23,6 +164,26 @@ MASTER_SCRIPT_PROMPT = """
 # 🎬 🧠 MASTER PROMPT — VIRAL BUSINESS CINEMATIC
 
 ## 🌍 TARGET LANGUAGE: {target_language}
+## 🎯 CORE TOPIC / TREND TO WRITE ABOUT: {topic}
+
+## 🔤 GLOSSARY & COHESION REQUIREMENTS (MANDATORY):
+- Keep brand names, fictitious tools, and algorithms 100% consistent across all scenes. 
+- Fictional MotoGP team name MUST always be spelled "Tekride".
+- Fictional predictive algorithm MUST always be spelled "RacePredict".
+- Ensure that sentences NEVER end abruptly or contain grammatical truncations (e.g. do not end a scene narration in the middle of a clause).
+- If referring to the current year or predictions, ALWAYS use the year 2026. Do not mention 2016.
+
+## 📊 RETENTION & DURATION INSTRUCTIONS:
+{duration_instructions}
+
+## 🎙️ NARRATION PACING INSTRUCTIONS:
+Each scene must contain {narration_instructions}
+
+## 💡 SUCCESS PATTERNS & SYSTEM FEEDBACK:
+{optimization_notes}
+
+## 💰 AFFILIATE LINK TO PROMOTE:
+{affiliate_url}
 
 You are writing for a top-tier faceless AI business channel. 
 The goal is HIGH-CTR, HIGH-RETENTION, and ALGORITHMIC OBSESSION.
@@ -31,11 +192,11 @@ The goal is HIGH-CTR, HIGH-RETENTION, and ALGORITHMIC OBSESSION.
 - **HOOK (0-5s):** Start with a shock in {target_language}.
 - **RETENTION:** Create curiosity loops. Every scene must lead to the next "payoff".
 - **STORYTELLING:** Follow a structure of: 1. Curiosity -> 2. Tension -> 3. Escalation -> 4. Reveal -> 5. Next Loop.
-- **VISUALS:** b_roll_visual must ALWAYS be in ENGLISH for search compatibility.
+- **VISUALS (CRITICAL):** b_roll_visual must ALWAYS be in ENGLISH for search compatibility. The visual query MUST exactly match and represent the narrated script. If the script talks about a specific object, interface, or action, the visual query must ask for that explicitly.
 
 ## 🚀 OUTPUT REQUIREMENTS:
 1. **ALL TEXT FIELDS (narration, description, title, marketing_strategy, quiz, thumb_text_vars) MUST BE WRITTEN IN {target_language}.**
-2. **ALL B_ROLL_VISUAL FIELDS MUST BE WRITTEN IN ENGLISH.**
+2. **ALL B_ROLL_VISUAL FIELDS MUST BE WRITTEN IN ENGLISH AND HIGHLY SPECIFIC TO THE SCENE'S NARRATION.**
 3. Viral title options (3-5 high-CTR options)
 4. High-CTR thumbnail concepts (3 visual descriptions)
 5. Hook variations (3 different ways to start the video)
@@ -128,7 +289,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
             import requests
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
             # Algumas páginas de vendas bloqueiam bots, mas o ClickBank Redirect (hop) deve ser 200/302
-            r = requests.get(url, headers=headers, timeout=12, allow_redirects=True)
+            r = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
             
             # Se a URL final for uma página de erro do ClickBank, o link é inválido
             error_patterns = [
@@ -222,7 +383,11 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
 
     # 2. IA: Busca contexto de vídeos virais anteriores (Loop de Aprendizado)
     optimization_notes = "Standard Viral Patterns: High pacing, aggressive hook, pattern interrupt."
-    # TODO: No futuro, buscar aqui do banco os top 20% que performaram bem
+    import os
+    elite_examples_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "channel_setup", "assets", "elite_script_examples.md")
+    if os.path.exists(elite_examples_path):
+        with open(elite_examples_path, "r", encoding="utf-8") as f:
+            optimization_notes += "\n\n" + f.read()
     
     import json
     
@@ -233,36 +398,38 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
     else:
         link_instruction = f"The affiliate link to promote is: {affiliate_url}. Mention it naturally."
 
-    # Instruções de duração baseadas no tipo de vídeo
-    is_short = job.video_type == "SHORT"
-    if is_short:
-        dur_instr = "Criar um roteiro para um SHORT VIRAL de EXATAMENTE 59 SEGUNDOS. LIMITE ABSOLUTO: 80 a 100 palavras NO TOTAL (script completo). MANDATÓRIO: Exatamente 5 a 6 cenas com 1 frase curta cada. PROIBIDO ultrapassar 100 palavras."
-        narr_instr = "ULTRA CURTA: exatamente 1 frase de alto impacto por cena (máximo 20 palavras por cena). Sem texto longo."
-
-    else:
-        dur_instr = "Criar um vídeo denso e altamente técnico focado em bater entre 12 e 15 minutos de narração (Obrigatório: mínimo absoluto de 2200 palavras totais). MANDATÓRIO: O vídeo DEVE ter exatamente 35 cenas detalhadas. Insira obrigatoriamente um 'Mini-Tutorial' ou 'Estudo de Caso Prático' na metade do roteiro."
-        narr_instr = "um TEXTO LONGO, EXTREMAMENTE DENSO e DESCRITIVO contendo rigorosamente ENTRE 100 e 120 PALAVRAS por cena. PROIBIDO escrever frases curtas ou tópicos. Cada cena deve ser um parágrafo robusto."
-
-    # Prepara o prompt com as notas de otimização e idioma
-    # INJETAMOS A DATA ATUAL PARA EVITAR ROTEIROS DE "2025"
+    # ───────────────────────────────────────────────────────
+    # 2. BUILD PROMPT via Retention Engine
+    # ───────────────────────────────────────────────────────
     current_date = datetime.now(timezone.utc).strftime("%B %Y")
-    
-    prompt = MASTER_SCRIPT_PROMPT.format(
-        topic=job.topic, 
-        affiliate_url=affiliate_url or "NONE",
-        optimization_notes=optimization_notes,
+    is_short = job.video_type == "SHORT"
+    num_scenes = 5 if is_short else 22
+
+    system_prompt, prompt = build_retention_prompt(
+        topic=job.topic,
         target_language=job.target_language or channel.language or "en-US",
-        duration_instructions=dur_instr,
-        narration_instructions=narr_instr
-    ) + f"\n\nCONTEXTO TEMPORAL: Hoje é {current_date}. Foque em tendências e dados dos últimos 30 dias. PROIBIDO citar 2024 ou 2025 como 'o futuro' ou 'este ano'. O ano atual é 2026." + f"\n\n{link_instruction}"
+        is_short=is_short,
+        affiliate_url=affiliate_url or "",
+        optimization_notes=optimization_notes,
+        current_date=current_date,
+        num_scenes=num_scenes,
+    )
+
+    prompt += (
+        f"\n\nCONTEXTO TEMPORAL: Hoje é {current_date}. "
+        f"PROIBIDO citar 2024 ou 2025 como 'o futuro'. O ano atual é 2026."
+    )
     
-    # Loop de Verificação de Densidade (Garante 12+ minutos)
+    # ───────────────────────────────────────────────────────
+    # 3. LLM GENERATION LOOP (with density + validator)
+    # ───────────────────────────────────────────────────────
     script_data = {}
     for attempt in range(4):
         raw_response = get_completion(
             prompt=prompt,
-            system_instruction=SYSTEM_PROMPT,
-            json_mode=True
+            system_instruction=system_prompt,
+            json_mode=True,
+            max_tokens=6000
         )
         
         print(f"DEBUG (Attempt {attempt+1}): Resposta Raw da IA (primeiros 200 chars): {raw_response[:200]}...")
@@ -280,20 +447,38 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                     total_text += " " + str(s.get("narration") or s.get("text") or s.get("texto") or s.get("content") or "")
             
             word_count = len(total_text.split())
-            
-            # Validação de contagem de palavras para vídeos longos
+
+            # ── Validator: remove duplicates BEFORE density check ──
+            validation_result = None
             if not is_short:
-                if word_count >= 1900:
-                    print(f"✅ Script validado com densidade suficiente: {word_count} palavras.")
+                script_data, validation_result = validate_and_fix_script(script_data, is_short=False)
+                # Re-count after deduplication
+                scenes_clean = script_data.get("scenes", [])
+                total_text = " ".join(
+                    str(s.get("narration") or s.get("text") or s.get("content") or "")
+                    for s in scenes_clean if isinstance(s, dict)
+                )
+                word_count = len(total_text.split())
+
+            # Density gate
+            if not is_short:
+                if word_count >= 1200:
+                    print(f"✅ Script validado: {word_count} palavras | Duplicatas: {len(validation_result.scenes_removed) if validation_result else 0} removidas")
+                    if validation_result and not validation_result.strong_hook:
+                        print("⚠️  HOOK FRACO detectado pelo Validator. Considere regenerar.")
                     break
                 else:
-                    print(f"⚠️ Script muito curto ({word_count} palavras). Solicitando expansão massiva (Tentativa {attempt+1}/4)...")
-                    prompt += f"\n\nCRITICAL: The previous response was only {word_count} words. YOU MUST WRITE LONGER PARAGRAPHS. EACH SCENE NARRATION MUST BE A FULL DENSE BLOCK OF 120-150 WORDS. TARGET 2500 WORDS TOTAL. Do not repeat content, expand on the technical details and case studies."
+                    print(f"⚠️ Script muito curto ({word_count} palavras). Solicitando expansão (Tentativa {attempt+1}/4)...")
+                    prompt += (
+                        f"\n\nCRITICAL: Only {word_count} words generated. "
+                        f"Each scene MUST have 60-75 words of narration. "
+                        f"Target: {num_scenes} scenes × 65 words = ~{num_scenes*65} words total."
+                    )
             else:
                 break # Shorts não precisam de validação de densidade longa
         except Exception as e:
             print(f"⚠️ Erro ao parsear JSON na tentativa {attempt+1}: {e}")
-            if attempt == 1: raise e
+            if attempt == 3: raise e
     
     try:
         # Normalização de Chaves (Anti-Alucinação)
@@ -329,7 +514,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
             ]
         # 3. Salva os dados estruturados no Job (Incluindo Estratégia Elite)
         job.topic = normalized.get("title", job.topic)
-        job.script_data = {
+        job.script_data = sanitize_script_glossary({
             "title": job.topic,
             "marketing_strategy": normalized.get("marketing_strategy", {}),
             "description": normalized.get("description", ""),
@@ -341,7 +526,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
             "cta_link": affiliate_url,
             "quiz": normalized.get("quiz", None),
             "generated_at": str(datetime.now(timezone.utc))
-        }
+        })
     except Exception as e:
         print(f"⚠️ Erro ao parsear JSON do script: {e}")
         import re
@@ -374,7 +559,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                 v = visuals[i].replace('\\"', '"') if i < len(visuals) else "cinematic and dramatic dark channel visual"
                 recovered_scenes.append({"timestamp": f"{i*10}-{i*10+10}s", "narration": clean_narration, "b_roll_visual": v})
             
-            job.script_data = {
+            job.script_data = sanitize_script_glossary({
                 "title": job.topic,
                 "description": recovered_desc,
                 "tags": recovered_tags,
@@ -383,10 +568,10 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                 "cta_link": affiliate_url,
                 "quiz": None,
                 "generated_at": str(datetime.now(timezone.utc))
-            }
+            })
         else:
             # Fallback para evitar aborto do Worker se falhar absurdamente
-            job.script_data = {
+            job.script_data = sanitize_script_glossary({
                 "title": job.topic,
                 "description": f"Masterclass sobre {job.topic}. Estratégias avançadas e insights exclusivos para você dominar este nicho.",
                 "tags": [job.topic.split()[-1], "AI", "Automation", "Success"],
@@ -396,7 +581,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                 ],
                 "cta_link": affiliate_url,
                 "generated_at": str(datetime.now(timezone.utc))
-            }
+            })
     
     # 4. Se o tenant tem auto_approve, já manda pro Worker
     tenant = session.get(Tenant, channel.tenant_id)

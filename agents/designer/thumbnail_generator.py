@@ -135,12 +135,15 @@ def orchestrate_thumbnail_generation(
                     safe_prompt = urllib.parse.quote(clean_prompt[:800])
                     poll_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1280&height=720&nologo=true&enhance=true&seed={int(time.time()) + attempt}"
                     
-                    response = requests.get(poll_url, timeout=90)
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                    response = requests.get(poll_url, headers=headers, timeout=30)
                     if response.status_code == 200 and len(response.content) > 10000:
                         image_bytes = response.content
                         break
                     else:
-                        logger.warning(f"Pollinations.ai falhou (Tentativa {attempt+1})")
+                        logger.warning(f"Pollinations.ai falhou (Tentativa {attempt+1}) com status={response.status_code}")
                 except Exception as e:
                     logger.warning(f"Erro na tentativa {attempt+1} do Pollinations: {e}")
                 time.sleep(2)

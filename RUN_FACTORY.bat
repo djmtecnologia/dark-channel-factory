@@ -17,6 +17,7 @@ echo [8] FORCAR NOVA PRODUCAO (Resetar jobs para PENDING)
 echo [9] Resetar Jobs ZUMBIS (THINKING/DRAFTED presos)
 echo [10] MODO ELITE 2026 (Multi-Canal US, FR, ES, DE)
 echo [11] FORCAR MODO ELITE (Ignorar Cotas Diarias)
+echo [12] MODO ELITE POR PAIS (Escolher Idiomas Especificos)
 echo.
 set /p opt="Escolha uma opcao: "
 
@@ -31,6 +32,7 @@ if "%opt%"=="8" goto op8
 if "%opt%"=="9" goto op9
 if "%opt%"=="10" goto op10
 if "%opt%"=="11" goto op11
+if "%opt%"=="12" goto op12
 
 echo [ERRO] Opcao invalida.
 pause
@@ -109,5 +111,14 @@ goto start
 :op11
 echo [ELITE-FORCE] Forcando Producao Multi-Canal (Ignorando Cotas)...
 python elite_production_test.py --force
+pause
+goto start
+
+:op12
+echo [ELITE-PAIS] Producao Especifica por Pais
+echo Idiomas disponiveis: en-US, fr-FR, es-ES, de-DE
+echo Exemplo para Espanha e Alemanha: es-ES,de-DE
+set /p langs="Digite os idiomas (separados por virgula): "
+python elite_production_test.py --force --langs "%langs%"
 pause
 goto start

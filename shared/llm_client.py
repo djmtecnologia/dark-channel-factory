@@ -22,9 +22,9 @@ load_dotenv()
 logger = get_logger(__name__)
 
 # ── Constantes ────────────────────────────────────────────────
-GEMINI_PRIMARY = os.getenv("LLM_PRIMARY_MODEL", "gemini-2.5-flash-preview-04-17")
-GEMINI_FALLBACK = os.getenv("LLM_FALLBACK_MODEL", "gemini-1.5-flash")
-OPENAI_FALLBACK = os.getenv("LLM_FINAL_FALLBACK", "gpt-4o-mini")
+GEMINI_PRIMARY = os.getenv("LLM_PRIMARY_MODEL", "gemini-3.5-flash").strip()
+GEMINI_FALLBACK = os.getenv("LLM_FALLBACK_MODEL", "gemini-2.5-flash").strip()
+OPENAI_FALLBACK = os.getenv("LLM_FINAL_FALLBACK", "gpt-4o-mini").strip()
 MOCK_LLM = os.getenv("MOCK_LLM", "false").lower() == "true"
 
 
@@ -57,7 +57,7 @@ class LLMClient:
     def _init_clients(self) -> None:
         """Inicializa clientes disponíveis silenciosamente."""
         # Gemini (Usando REST API direta para evitar SDK deprecated)
-        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
         if gemini_key and gemini_key != "your_gemini_api_key_here":
             self._gemini_api_key = gemini_key
             self._gemini_client = True # Flag para indicar que está disponível
@@ -74,6 +74,16 @@ class LLMClient:
                 logger.debug("DeepSeek client initialized (high-priority fallback)")
             except ImportError:
                 logger.warning("openai not installed — DeepSeek unavailable")
+
+        # OpenAI (DALL-E 3 & Fallback)
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if openai_key and openai_key != "your_openai_api_key_here":
+            try:
+                from openai import OpenAI
+                self._openai_client = OpenAI(api_key=openai_key)
+                logger.debug("OpenAI client initialized (DALL-E 3 + Fallback)")
+            except ImportError:
+                logger.warning("openai not installed — OpenAI unavailable")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -268,7 +278,7 @@ def get_llm_client() -> LLMClient:
 
 from shared.ai_orchestrator import orchestrator
 
-def get_completion(prompt: str, system_instruction: str = "", model_choice: str = "gemini", json_mode: bool = False) -> str:
+def get_completion(prompt: str, system_instruction: str = "", model_choice: str = "gemini", json_mode: bool = False, max_tokens: int = 4096) -> str:
     """
     Função de conveniência que utiliza o AIOrchestrator (Arquiteto Tier List).
     Ignora model_choice para seguir a política de contingência 100% disponível.
@@ -277,7 +287,8 @@ def get_completion(prompt: str, system_instruction: str = "", model_choice: str 
         response = orchestrator.chat_completion(
             system_prompt=system_instruction,
             user_prompt=prompt,
-            json_mode=json_mode
+            json_mode=json_mode,
+            max_tokens=max_tokens
         )
         return response.text
     except Exception as e:

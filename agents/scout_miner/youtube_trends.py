@@ -43,48 +43,54 @@ class TrendsAnalyzer:
         self._geo = "US"
 
     def get_rising_queries(self, keywords: list[str]) -> dict[str, Any]:
-        """Retorna queries em alta para os keywords fornecidos."""
+        """Retorna queries em alta e hot topics (presentes em 7d e 24h)."""
         try:
-            from pytrends.request import TrendReq  # type: ignore
+            from pytrends.request import TrendReq
 
             pt = TrendReq(hl=self._hl, tz=0, timeout=(10, 25))
 
-            results: dict[str, list] = {"rising": [], "top": []}
+            results: dict[str, list] = {"rising": [], "top": [], "hot_topics": []}
 
-            for kw in keywords[:3]:  # Limita para evitar rate limit
+            for kw in keywords[:2]:  # Limitado a 2 para evitar rate limit
                 try:
+                    # Busca de 7 dias
                     pt.build_payload([kw], timeframe="now 7-d", geo=self._geo)
-                    related = pt.related_queries()
-
-                    kw_data = related.get(kw, {})
-                    rising = kw_data.get("rising")
-                    top = kw_data.get("top")
-
-                    if rising is not None and not rising.empty:
-                        top_rising = rising.head(5)["query"].tolist()
-                        results["rising"].extend(top_rising)
-                        logger.debug(f"Rising queries for '{kw}': {top_rising}")
-
-                    if top is not None and not top.empty:
-                        top_queries = top.head(5)["query"].tolist()
-                        results["top"].extend(top_queries)
-
-                    time.sleep(2)  # Rate limit
+                    rising_7d = []
+                    r7 = pt.related_queries().get(kw, {}).get("rising")
+                    if r7 is not None and not r7.empty:
+                        rising_7d = r7.head(10)["query"].tolist()
+                        results["rising"].extend(rising_7d[:5])
+                    
+                    time.sleep(2)
+                    
+                    # Busca de 24 horas
+                    pt.build_payload([kw], timeframe="now 1-d", geo=self._geo)
+                    rising_1d = []
+                    r1 = pt.related_queries().get(kw, {}).get("rising")
+                    if r1 is not None and not r1.empty:
+                        rising_1d = r1.head(10)["query"].tolist()
+                        results["rising"].extend(rising_1d[:5])
+                    
+                    # Interseção (Assuntos quentes em ambos os períodos)
+                    hot = list(set(rising_7d) & set(rising_1d))
+                    if hot:
+                        results["hot_topics"].extend(hot)
+                    
+                    time.sleep(2)
                 except Exception as e:
                     logger.warning(f"pytrends error for '{kw}': {e}")
                     continue
 
-            # Deduplicate
             results["rising"] = list(dict.fromkeys(results["rising"]))
-            results["top"] = list(dict.fromkeys(results["top"]))
+            results["hot_topics"] = list(dict.fromkeys(results["hot_topics"]))
             return results
 
         except ImportError:
             logger.warning("pytrends not installed — returning seed keywords")
-            return {"rising": AI_TOOLS_SEED_KEYWORDS[:5], "top": AI_TOOLS_SEED_KEYWORDS[5:]}
+            return {"rising": AI_TOOLS_SEED_KEYWORDS[:5], "top": AI_TOOLS_SEED_KEYWORDS[5:], "hot_topics": []}
         except Exception as e:
             logger.error(f"Trends analysis failed: {e}")
-            return {"rising": AI_TOOLS_SEED_KEYWORDS[:5], "top": []}
+            return {"rising": AI_TOOLS_SEED_KEYWORDS[:5], "top": [], "hot_topics": []}
 
 
 class YouTubeCompetitionAnalyzer:
@@ -233,14 +239,29 @@ def collect_trend_data(language: str = "en-US") -> dict[str, Any]:
 
     # Analisa competição para os top seeds
     competition_insights = []
-    for kw in AI_TOOLS_SEED_KEYWORDS[:3]:
+    for kw in AI_TOOLS_SEED_KEYWORDS[:2]:
         insight = competition.analyze_competition(kw)
         competition_insights.append(insight)
         time.sleep(1)
+        
+    hot_topics = trend_data.get("hot_topics", [])
+    modeling_targets = []
+    if hot_topics:
+        logger.info(f"🔥 Found Hot Topics (7d & 24h intersect): {hot_topics}")
+        for hot in hot_topics[:2]: # Pega os 2 mais quentes
+            # search YouTube for hot topic, ordered by viewCount
+            insight = competition.analyze_competition(hot)
+            if insight and insight.get("top_titles"):
+                modeling_targets.append({
+                    "topic": hot,
+                    "target_titles": insight.get("top_titles", [])[:3], # Top 3 most viewed
+                    "max_views": insight.get("max_views", 0)
+                })
 
     return {
         "trending_queries": trend_data,
         "competition_analysis": competition_insights,
+        "modeling_targets": modeling_targets,
         "seed_keywords": AI_TOOLS_SEED_KEYWORDS,
         "target_region": "US",
         "language": language,
