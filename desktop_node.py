@@ -1293,14 +1293,66 @@ def render_video(job_data):
                         print(f"⚠️ Falha ao auto-injetar SFX whoosh: {e}")
 
         for i, (scene, p) in enumerate(zip(scenes_list, downloaded_paths)):
+            # Calcula a duração da cena para o fallback
+            try:
+                ts_raw = scene.get("timestamp", "0:00-0:10")
+                parts_ts = ts_raw.split("-")
+                def _to_sec(t):
+                    t = str(t).strip().replace("s", "")
+                    if ":" in t:
+                        m, s = t.split(":")
+                        return int(m) * 60 + float(s)
+                    return float(t)
+                scene_dur = max(_to_sec(parts_ts[1]) - _to_sec(parts_ts[0]), 5)
+            except:
+                scene_dur = 5
+
+            def _make_animated_fallback(dur, idx):
+                """Gera vídeo de fallback animado via FFmpeg geq para evitar tela preta/estática."""
+                fb_path = os.path.join(OUTPUT_DIR, f"fallback_anim_{job_id}_{idx}.mp4")
+                if os.path.exists(fb_path):
+                    return fb_path
+                geq_r = "if(lte(mod(X/W+T*0.05,1),0.5),26+10*sin(T*1.5+X/W*3.14),18+8*cos(T*1.2+Y/H*3.14))"
+                geq_g = "if(lte(mod(Y/H+T*0.04,1),0.5),10+5*sin(T*1.8+Y/H*2),8+4*cos(T*1.1+X/W*2))"
+                geq_b = "30+20*sin(T*0.8+X/W*1.5)*cos(T*0.6+Y/H*1.5)"
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-f", "lavfi",
+                    "-i", f"nullsrc=size=1280x720:rate=30:duration={dur}",
+                    "-vf", f"geq=r='{geq_r}':g='{geq_g}':b='{geq_b}',format=yuv420p",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-an", fb_path
+                ]
+                try:
+                    res = subprocess.run(cmd, capture_output=True, timeout=120)
+                    if res.returncode == 0:
+                        return fb_path
+                except Exception:
+                    pass
+                # Fallback-do-fallback: ruído sobre cor escura
+                cmd2 = [
+                    ffmpeg_exe, "-y",
+                    "-f", "lavfi",
+                    "-i", f"color=c=0x1a1a2e:size=1280x720:rate=30:duration={dur}",
+                    "-vf", "noise=alls=12:allf=t,format=yuv420p",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-an", fb_path
+                ]
+                try:
+                    subprocess.run(cmd2, capture_output=True, timeout=120)
+                    return fb_path
+                except Exception:
+                    return None
+
             if not p:
-                print(f"🚨 [ERRO] Falha na cena {i}. Injetando fallback visual para manter duração.")
-                p = get_resource_path("channel_setup/assets/visuals/fallback_static.jpg")
-            
+                print(f"🚨 [CENA {i}] B-roll não encontrado. Gerando background animado...")
+                p = _make_animated_fallback(scene_dur, i)
+
             if not p or not os.path.exists(p):
-                # Fallback absoluto (estático pré-existente)
-                p = get_resource_path("channel_setup/assets/visuals/fallback_static.jpg")
-            
+                print(f"🚨 [CENA {i}] Gerando background animado (fallback final)...")
+                p = _make_animated_fallback(scene_dur, i)
+
+            if not p or not os.path.exists(p):
+                print(f"⚠️ [CENA {i}] Todos os fallbacks falharam. Pulando cena.")
+                continue
 
             cenas.append(p)
             try:

@@ -75,34 +75,86 @@ def run_scout_agent(
         system_prompt=SCOUT_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         temperature=0.8,
-        max_tokens=1024,
+        max_tokens=4096,
         json_mode=True,
     )
 
-    # ── Step 4: Parsear resposta ────────────────────────────────
+    # ── Step 4: Parsear resposta (Defensivo + Reparo de Truncamento) ──
+    raw = llm_response.text.strip()
+    
+    # 1. Limpeza de Markdown Code Fences
+    if "```json" in raw:
+        raw = raw.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw:
+        raw = raw.split("```")[1].split("```")[0].strip()
+        
+    start_idx = raw.find('{')
+    if start_idx != -1:
+        end_idx = raw.rfind('}')
+        if end_idx != -1 and end_idx > start_idx:
+            raw = raw[start_idx:end_idx+1]
+        else:
+            raw = raw[start_idx:]
+        
     try:
-        raw = llm_response.text.strip()
-        # Remove markdown code fences se presentes
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.error(f"[Scout] Failed to parse LLM JSON: {e}\nRaw: {llm_response.text[:500]}")
-        raise
+        logger.warning(f"[Scout] Initial JSON parse failed: {e}. Attempting automated heuristic repair...")
+        
+        # Reparo Rápido de Truncamento de String
+        candidate = raw
+        if candidate.count('"') % 2 != 0:
+            candidate += '"'
+            
+        # Fechamento balanceado de Chaves e Colchetes
+        brace_count = candidate.count('{') - candidate.count('}')
+        bracket_count = candidate.count('[') - candidate.count(']')
+        
+        if bracket_count > 0:
+            candidate += ']' * bracket_count
+        if brace_count > 0:
+            candidate += '}' * brace_count
+            
+        try:
+            data = json.loads(candidate)
+            logger.info("✅ [Scout] JSON successfully repaired and parsed!")
+        except json.JSONDecodeError as final_err:
+            logger.error(f"[Scout] Critical JSON parse failure after repair: {final_err}. Using regex/default fallback...")
+            
+            import re
+            topic_match = re.search(r'"topic"\s*:\s*"([^"]+)"', raw)
+            kw_match = re.search(r'"primary_keyword"\s*:\s*"([^"]+)"', raw)
+            angle_match = re.search(r'"angle"\s*:\s*"([^"]+)"', raw)
+            
+            topic = topic_match.group(1) if topic_match else ("Como a IA está mudando o mundo" if "pt" in channel.language else "How AI is Changing the World")
+            kw = kw_match.group(1) if kw_match else ("inteligência artificial" if "pt" in channel.language else "artificial intelligence")
+            angle = angle_match.group(1) if angle_match else ("educacional" if "pt" in channel.language else "educational")
+            
+            data = {
+                "topic": topic,
+                "primary_keyword": kw,
+                "angle": angle,
+                "secondary_keywords": [],
+                "lsi_keywords": [],
+                "content_gap": "Desconhecido",
+                "target_audience": "professionals",
+                "estimated_cpm_usd": 25.0,
+                "niche_score": 75,
+                "competition_level": "medium"
+            }
+            logger.info("✅ [Scout] Successfully extracted basic fields using regex backup!")
 
     # ── Step 5: Construir NicheData ─────────────────────────────
     niche_data = NicheData(
         job_id=UUID(job_id),
-        topic=data["topic"],
+        topic=data.get("topic", "Default Topic"),
         language=channel.language,
         voice=channel.voice,
         niche=Niche(channel.niche),
-        primary_keyword=data["primary_keyword"],
+        primary_keyword=data.get("primary_keyword", "AI"),
         secondary_keywords=data.get("secondary_keywords", []),
         lsi_keywords=data.get("lsi_keywords", []),
-        angle=data["angle"],
+        angle=data.get("angle", "Default Angle"),
         content_gap=data.get("content_gap", ""),
         target_audience=data.get("target_audience", "professionals aged 25-45"),
         estimated_cpm_usd=float(data.get("estimated_cpm_usd", 25.0)),

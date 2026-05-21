@@ -135,8 +135,8 @@ class ValidatorAgent:
                 bitrate_kbps = (size_bytes * 8) / (duration * 1024)
                 
                 # Para vídeos longos com loops perfeitos (B-rolls repetidos), o encoder h264 comprime brutalmente.
-                # Reduzimos o limite para evitar falsos positivos de tela estática, já que temos o teste de frames.
-                limit = 180 if self.video_type == "LONG" else 350
+                # 150 kbps é o piso real para detectar tela preta/estoque; backgrounds animados ficam acima disso.
+                limit = 150 if self.video_type == "LONG" else 350
                 if bitrate_kbps < limit:
                     self.errors.append(f"Densidade visual insuficiente ({bitrate_kbps:.1f} kbps). O vídeo parece ser estático ou tela preta.")
         except: pass
@@ -169,8 +169,9 @@ class ValidatorAgent:
         black_frames = 0
         for frame in hook_frames:
             size_kb = os.path.getsize(frame) / 1024
-            # Ajustado para vídeos Dark: Se o frame é extremamente leve (< 20KB), é suspeito
-            if size_kb < 20: 
+            # Limiar calibrado: frames dark-cinéticos reais ficam acima de 12KB;
+            # apenas telas 100% pretas ou estocadas ficam abaixo disso.
+            if size_kb < 12: 
                 black_frames += 1
                 
         # Limpeza

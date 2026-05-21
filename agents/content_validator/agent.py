@@ -17,27 +17,31 @@ logger = get_logger(__name__)
 
 VALIDATION_THRESHOLD_ORIGINALITY = 70.0
 VALIDATION_THRESHOLD_QUALITY = 65.0
-VALIDATION_THRESHOLD_VALUE = 65.0
-MIN_WORD_COUNT = 600    # Mínimo para 6-8 minutos de vídeo
+VALIDATION_THRESHOLD_VALUE = 70.0       # Elevado: valor transformativo é requisito central
+MIN_WORD_COUNT = 1800   # Mínimo para 15 minutos de vídeo a ~120 wpm
 
 SYSTEM_PROMPT = """You are a senior content quality analyst for YouTube.
-Your job: evaluate a video script for QUALITY and ORIGINALITY.
+Your job: evaluate a video script for QUALITY, ORIGINALITY, and TRANSFORMATIVE VALUE.
 
 Evaluate these dimensions (each 0-100):
-1. ORIGINALITY (0-100): Is this content unique? Does it present a fresh perspective? 
+1. ORIGINALITY (0-100): Is this content unique? Does it present a fresh perspective?
    Flags: Generic information, copy of existing videos, Wikipedia-style narration.
-2. NARRATIVE QUALITY (0-100): Is the hook strong (first 5 seconds)? 
+2. NARRATIVE QUALITY (0-100): Is the hook strong (first 5 seconds)?
    Are there open loops throughout? Is the structure engaging? Does it have a clear CTA?
    Flags: Weak hook, no pattern interrupts, lecture-style narration.
-3. TRANSFORMATIVE VALUE (0-100): After watching, will viewers feel they gained something? 
-   Is there at least 1 actionable takeaway? Real examples or data?
-   Flags: Fluffy content, no actionable advice, pure motivation without substance.
-   
+3. TRANSFORMATIVE VALUE (0-100): After watching, will viewers feel they gained something CONCRETE?
+   Score 90-100: Step-by-step instructions with named tools + before/after proof.
+   Score 70-89: Actionable advice with specific examples.
+   Score 50-69: General advice, some examples, no clear steps.
+   Score 0-49: Motivational/fluffy content with no actionable takeaways.
+   Flags: No named tools, no specific steps, no before/after, pure motivation.
+
 PROHIBITED CONTENT (instant fail):
 - Pure motivational content without substance
 - Misinformation or unverifiable claims
 - Plagiarized or generic content
-- Less than 600 words total
+- Scripts with zero actionable instructions
+- Less than 1800 words total
 
 Return ONLY valid JSON.
 """

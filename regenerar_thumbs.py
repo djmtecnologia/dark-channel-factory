@@ -153,7 +153,7 @@ def _gen_dalle(context: str, output_path: str) -> bool:
 
 
 def _gen_gemini(context: str, output_path: str) -> bool:
-    """Gemini Imagen 3 — 16:9 nativo."""
+    """Gemini Imagen 4.0 — 16:9 nativo."""
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     if not gemini_key:
         return False
@@ -161,14 +161,18 @@ def _gen_gemini(context: str, output_path: str) -> bool:
         import base64
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"imagen-3.0-generate-002:predict?key={gemini_key}"
+            f"imagen-4.0-generate-001:predict?key={gemini_key}"
         )
         payload = {
             "instances": [{"prompt": (
                 f"YouTube thumbnail 16:9. Ultra dramatic. Context: {context}. "
                 f"Style: viral dark channel, neon glow, high contrast, bold readable text, no blur."
             )}],
-            "parameters": {"sampleCount": 1, "aspectRatio": "16:9"}
+            "parameters": {
+                "sampleCount": 1, 
+                "aspectRatio": "16:9",
+                "outputMimeType": "image/jpeg"
+            }
         }
         resp = requests.post(url, json=payload, timeout=30)
         if resp.status_code == 200:
@@ -182,7 +186,7 @@ def _gen_gemini(context: str, output_path: str) -> bool:
 
 
 def _gen_pollinations(context: str, output_path: str, seed: int = 0) -> bool:
-    """Pollinations.ai com enhance=true — gratuito e ilimitado."""
+    """Pollinations.ai com enhance=false (rápido e ilimitado)."""
     prompt = (
         f"Ultra high quality YouTube thumbnail, 16:9, no black bars, full frame. "
         f"Dramatic cinematic dark background, vivid colors (red, yellow, neon orange), "
@@ -193,7 +197,7 @@ def _gen_pollinations(context: str, output_path: str, seed: int = 0) -> bool:
     safe = urllib.parse.quote(prompt[:800])
     url  = (
         f"https://image.pollinations.ai/prompt/{safe}"
-        f"?width={YT_W}&height={YT_H}&nologo=true&enhance=true&seed={seed}"
+        f"?width={YT_W}&height={YT_H}&nologo=true&enhance=false&seed={seed}"
     )
     try:
         resp = requests.get(url, timeout=60)
@@ -213,8 +217,8 @@ def _gen_pollinations(context: str, output_path: str, seed: int = 0) -> bool:
 def generate_to_path(output_path: str, context: str, seed: int = 0) -> bool:
     providers = [
         ("🎨 DALL-E 3 (OpenAI HD)",    lambda: _gen_dalle(context, output_path)),
-        ("🔮 Gemini Imagen 3",          lambda: _gen_gemini(context, output_path)),
-        ("🌐 Pollinations (Enhance)",   lambda: _gen_pollinations(context, output_path, seed=seed)),
+        ("🔮 Gemini Imagen 4.0",        lambda: _gen_gemini(context, output_path)),
+        ("🌐 Pollinations.ai",          lambda: _gen_pollinations(context, output_path, seed=seed)),
     ]
     for name, fn in providers:
         print(f"  ⏳ Tentando {name}...")

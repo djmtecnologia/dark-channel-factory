@@ -5,6 +5,10 @@ Verifica se todos os componentes estão funcionando corretamente.
 """
 import os
 import sys
+
+# Configure stdout to use UTF-8
+sys.stdout.reconfigure(encoding='utf-8')
+
 from typing import Dict, List, Tuple
 
 # Cores para output
@@ -15,7 +19,9 @@ BLUE = '\033[94m'
 RESET = '\033[0m'
 
 def check_mark(passed: bool) -> str:
-    return f"{GREEN}✓{RESET}" if passed else f"{RED}✗{RESET}"
+    # Use standard text indicators inside checkmarks to be 100% terminal-safe
+    return f"{GREEN}[OK]{RESET}" if passed else f"{RED}[X]{RESET}"
+
 
 def print_header(text: str):
     print(f"\n{BLUE}{'=' * 60}{RESET}")
@@ -193,7 +199,7 @@ def run_health_check():
     print(f"\n{YELLOW}6. Redis{RESET}")
     redis_ok, redis_msg = check_redis_connection()
     if redis_ok:
-        print(f"  {GREEN}✓{RESET} {redis_msg}")
+        print(f"  {GREEN}[OK]{RESET} {redis_msg}")
     else:
         print(f"  {YELLOW}⚠️  {redis_msg} (Opcional - O Worker de Edição funcionará perfeitamente usando fallback HTTP/REST){RESET}")
     
@@ -216,11 +222,11 @@ def run_health_check():
     )
     
     if all_critical_ok:
-        print(f"{GREEN}✓ Sistema pronto para produção!{RESET}\n")
+        print(f"{GREEN}[OK] Sistema pronto para produção!{RESET}\n")
         return 0
     else:
-        print(f"{RED}✗ Existem problemas que precisam ser corrigidos.{RESET}")
-        print(f"{YELLOW}  Veja os erros marcados com ✗ acima.{RESET}\n")
+        print(f"{RED}[X] Existem problemas que precisam ser corrigidos.{RESET}")
+        print(f"{YELLOW}  Veja os erros marcados com [X] acima.{RESET}\n")
         return 1
 
 if __name__ == "__main__":

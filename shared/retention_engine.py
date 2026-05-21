@@ -472,10 +472,12 @@ def build_retention_prompt(
         prompt_template = RETENTION_SHORT_PROMPT
     else:
         dur_instructions = (
-            f"LONG VIDEO: 8–12 minutes of narration. "
-            f"Exactly {num_scenes} scenes. "
-            f"1400–1700 words total across all scenes. "
-            f"60–75 words per scene narration."
+            f"LONG VIDEO: 14–18 minutes of narration. "
+            f"Exactly {num_scenes} scenes (MANDATORY — do NOT write fewer). "
+            f"2100–2400 words total across all scenes. "
+            f"60–75 words per scene narration. "
+            f"CRITICAL: {num_scenes} scenes × ~22s per scene = ~792s. "
+            f"The video MUST exceed 720 seconds or it will FAIL quality control."
         )
         narr_instructions = (
             "A dense, complete paragraph of 60–75 words. "

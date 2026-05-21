@@ -19,8 +19,11 @@ from shared.logger import get_logger
 load_dotenv()
 logger = get_logger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-SQLITE_PATH = Path(os.getenv("SQLITE_PATH", "output/logs/factory.db"))
+def _get_db_url() -> str:
+    return os.getenv("DATABASE_URL", "")
+
+def _get_sqlite_path() -> Path:
+    return Path(os.getenv("SQLITE_PATH", "output/logs/factory.db"))
 
 
 def _init_sqlite(db_path: Path) -> sqlite3.Connection:
@@ -40,26 +43,28 @@ def _init_sqlite(db_path: Path) -> sqlite3.Connection:
 
 
 @contextmanager
-def get_db() -> Generator[sqlite3.Connection, None, None]:
+def get_db() -> Generator[Any, None, None]:
     """Context manager para conexão com o banco."""
-    if DATABASE_URL and DATABASE_URL.startswith("postgresql"):
+    db_url = _get_db_url()
+    sqlite_path = _get_sqlite_path()
+    if db_url and db_url.startswith("postgresql"):
         # PostgreSQL via psycopg2 (Neon/Supabase)
         try:
             import psycopg2  # type: ignore
-            conn = psycopg2.connect(DATABASE_URL)
+            conn = psycopg2.connect(db_url)
             try:
                 yield conn
             finally:
                 conn.close()
         except ImportError:
             logger.warning("psycopg2 not installed — falling back to SQLite")
-            conn = _init_sqlite(SQLITE_PATH)
+            conn = _init_sqlite(sqlite_path)
             try:
                 yield conn
             finally:
                 conn.close()
     else:
-        conn = _init_sqlite(SQLITE_PATH)
+        conn = _init_sqlite(sqlite_path)
         try:
             yield conn
         finally:
@@ -71,13 +76,68 @@ def _now() -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+# Database Query Helpers (psycopg2 & SQLite Unified Layer)
+# ─────────────────────────────────────────────────────────────
+
+def _execute_query(conn: Any, query: str, params: Any = None) -> Any:
+    """
+    Executes a query by automatically adapting parameters syntax between SQLite and PostgreSQL,
+    and returns the cursor context.
+    """
+    is_pg = False
+    db_url = _get_db_url()
+    if db_url and db_url.startswith("postgresql") and not type(conn).__module__.startswith("sqlite3"):
+        is_pg = True
+
+    # Adapt query syntax
+    if is_pg:
+        # Replace SQLite style '?' with PostgreSQL '%s'
+        if isinstance(params, (list, tuple)):
+            query = query.replace("?", "%s")
+        # Replace SQLite style ':param' with PostgreSQL '%(param)s'
+        elif isinstance(params, dict):
+            import re
+            query = re.sub(r'(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)', r'%(\1)s', query)
+            
+    cursor = conn.cursor()
+    try:
+        if params is not None:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        return cursor
+    except Exception as e:
+        logger.error(f"Database execution error: {e}\nQuery: {query}\nParams: {params}")
+        raise
+
+
+def _execute_non_query(conn: Any, query: str, params: Any = None) -> None:
+    """Executes a non-query command (INSERT, UPDATE, DELETE) and safely closes the cursor."""
+    cursor = _execute_query(conn, query, params)
+    cursor.close()
+
+
+def _fetch_all(conn: Any, query: str, params: Any = None) -> list[dict]:
+    """Executes a query, fetches all results as dicts, and safely closes the cursor."""
+    cursor = _execute_query(conn, query, params)
+    try:
+        desc = cursor.description
+        if desc:
+            columns = [col[0] for col in desc]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return []
+    finally:
+        cursor.close()
+
+
+# ─────────────────────────────────────────────────────────────
 # Videos
 # ─────────────────────────────────────────────────────────────
 
 def upsert_video(record: dict) -> None:
     """Insere ou atualiza registro de vídeo."""
     with get_db() as conn:
-        conn.execute("""
+        _execute_non_query(conn, """
             INSERT INTO videos (
                 id, youtube_video_id, channel_id, title, niche, language,
                 country_code, topic, angle, primary_keyword, viral_score,
@@ -119,7 +179,7 @@ def upsert_video(record: dict) -> None:
 def update_video_analytics(youtube_video_id: str, analytics: dict) -> None:
     """Atualiza métricas de analytics de um vídeo."""
     with get_db() as conn:
-        conn.execute("""
+        _execute_non_query(conn, """
             UPDATE videos SET
                 ctr_percent=:ctr,
                 retention_percent=:retention,
@@ -157,8 +217,7 @@ def get_top_performing_videos(niche: str = "", language: str = "", limit: int = 
             params.append(language)
         query += " ORDER BY ctr_percent DESC LIMIT ?"
         params.append(limit)
-        rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        return _fetch_all(conn, query, params)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -169,7 +228,7 @@ def save_topic(topic: str, niche: str, language: str, viral_score: float,
                angle: str = "", video_id: str = "") -> None:
     """Salva tópico no histórico."""
     with get_db() as conn:
-        conn.execute("""
+        _execute_non_query(conn, """
             INSERT INTO topics_history (topic, niche, language, angle, viral_score, used_at, video_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (topic, niche, language, angle, viral_score, _now(), video_id))
@@ -179,10 +238,10 @@ def save_topic(topic: str, niche: str, language: str, viral_score: float,
 def topic_exists(topic: str, niche: str, language: str, similarity_threshold: int = 80) -> bool:
     """Verifica se tópico similar já existiu (comparação simples por palavras-chave)."""
     with get_db() as conn:
-        rows = conn.execute(
+        rows = _fetch_all(conn, 
             "SELECT topic FROM topics_history WHERE niche=? AND language=? ORDER BY used_at DESC LIMIT 50",
             (niche, language)
-        ).fetchall()
+        )
 
     topic_words = set(topic.lower().split())
     for row in rows:
@@ -202,7 +261,7 @@ def upsert_winning_pattern(pattern_type: str, pattern_value: str, niche: str,
                             language: str, ctr: float, retention: float) -> None:
     """Insere ou atualiza padrão vencedor."""
     with get_db() as conn:
-        conn.execute("""
+        _execute_non_query(conn, """
             INSERT INTO winning_patterns (pattern_type, pattern_value, niche, language,
                                           avg_ctr, avg_retention, sample_size, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, 1, ?)
@@ -228,8 +287,7 @@ def get_winning_patterns(niche: str = "", language: str = "", limit: int = 20) -
             params.append(language)
         query += " ORDER BY avg_ctr DESC LIMIT ?"
         params.append(limit)
-        rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        return _fetch_all(conn, query, params)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -240,7 +298,7 @@ def save_pipeline_job(job_id: str, channel_id: str, status: str,
                        niche: str = "", language: str = "", topic: str = "") -> None:
     """Registra ou atualiza estado de um job na pipeline."""
     with get_db() as conn:
-        conn.execute("""
+        _execute_non_query(conn, """
             INSERT INTO pipeline_jobs (id, channel_id, status, niche, language, topic, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
@@ -253,7 +311,7 @@ def save_pipeline_job(job_id: str, channel_id: str, status: str,
 def fail_pipeline_job(job_id: str, error_message: str, retry_count: int = 0) -> None:
     """Marca job como falho com mensagem de erro."""
     with get_db() as conn:
-        conn.execute("""
+        _execute_non_query(conn, """
             UPDATE pipeline_jobs SET status='failed', error_message=?, retry_count=?
             WHERE id=?
         """, (error_message[:1000], retry_count, job_id))
@@ -263,8 +321,7 @@ def fail_pipeline_job(job_id: str, error_message: str, retry_count: int = 0) -> 
 def get_failed_jobs(limit: int = 50) -> list[dict]:
     """Retorna jobs que falharam para retry."""
     with get_db() as conn:
-        rows = conn.execute(
+        return _fetch_all(conn, 
             "SELECT * FROM pipeline_jobs WHERE status='failed' AND retry_count < 3 ORDER BY created_at DESC LIMIT ?",
             (limit,)
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )

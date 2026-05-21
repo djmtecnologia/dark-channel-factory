@@ -4,6 +4,10 @@ import ast
 import traceback
 import importlib
 
+# Configure stdout to use UTF-8
+sys.stdout.reconfigure(encoding='utf-8')
+
+
 def run_diagnostics():
     print("=" * 60)
     print("      DARK CHANNEL FACTORY - COMPREHENSIVE SYNTAX DIAGNOSTIC")

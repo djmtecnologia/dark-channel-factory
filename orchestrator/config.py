@@ -30,7 +30,7 @@ class ChannelConfig:
     tts_volume: str = "+10%"
     video_resolution: str = "1920x1080"
     video_fps: int = 30
-    target_duration_s: int = 480    # 8 minutos
+    target_duration_s: int = 900    # 15 minutos (garante mínimo QC de 720s para LONG)
     ctr_threshold: float = 4.0      # % → troca thumbnail
     retention_threshold: float = 45.0  # % → dispara deep dive
 

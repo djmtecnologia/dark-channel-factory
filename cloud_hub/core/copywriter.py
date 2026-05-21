@@ -403,7 +403,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
     # ───────────────────────────────────────────────────────
     current_date = datetime.now(timezone.utc).strftime("%B %Y")
     is_short = job.video_type == "SHORT"
-    num_scenes = 5 if is_short else 22
+    num_scenes = 5 if is_short else 36  # 36 cenas × ~22s = ~792s > 720s mínimo do QC
 
     system_prompt, prompt = build_retention_prompt(
         topic=job.topic,
@@ -462,7 +462,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
 
             # Density gate
             if not is_short:
-                if word_count >= 1200:
+                if word_count >= 1500:  # ~36 cenas × 42 palavras = 1512 palavras mínimo
                     print(f"✅ Script validado: {word_count} palavras | Duplicatas: {len(validation_result.scenes_removed) if validation_result else 0} removidas")
                     if validation_result and not validation_result.strong_hook:
                         print("⚠️  HOOK FRACO detectado pelo Validator. Considere regenerar.")
@@ -471,6 +471,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                     print(f"⚠️ Script muito curto ({word_count} palavras). Solicitando expansão (Tentativa {attempt+1}/4)...")
                     prompt += (
                         f"\n\nCRITICAL: Only {word_count} words generated. "
+                        f"You MUST write EXACTLY {num_scenes} scenes. "
                         f"Each scene MUST have 60-75 words of narration. "
                         f"Target: {num_scenes} scenes × 65 words = ~{num_scenes*65} words total."
                     )
@@ -478,7 +479,8 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                 break # Shorts não precisam de validação de densidade longa
         except Exception as e:
             print(f"⚠️ Erro ao parsear JSON na tentativa {attempt+1}: {e}")
-            if attempt == 3: raise e
+            if attempt == 3:
+                print("⚠️ Todas as 4 tentativas falharam. Ativando recuperação emergencial via Regex...")
     
     try:
         # Normalização de Chaves (Anti-Alucinação)

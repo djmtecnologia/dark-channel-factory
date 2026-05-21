@@ -21,6 +21,7 @@ from uuid import uuid4
 os.environ["MOCK_LLM"] = "true"
 os.environ["SKIP_UPLOAD"] = "true"
 os.environ["DRY_RUN"] = "true"
+os.environ["DATABASE_URL"] = ""
 os.environ["SQLITE_PATH"] = str(Path(tempfile.mkdtemp()) / "test_factory.db")
 
 
@@ -149,10 +150,17 @@ class TestDatabaseManager(unittest.TestCase):
         """DB deve ser criado com schema correto."""
         from database.db_manager import get_db
         with get_db() as conn:
-            tables = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-            table_names = [t[0] for t in tables]
+            cursor = conn.cursor()
+            try:
+                is_pg = hasattr(conn, 'pgconn') or type(conn).__module__.startswith("psycopg2")
+                if is_pg:
+                    cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
+                else:
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = cursor.fetchall()
+                table_names = [t[0] for t in tables]
+            finally:
+                cursor.close()
 
         self.assertIn("videos", table_names)
         self.assertIn("shorts", table_names)

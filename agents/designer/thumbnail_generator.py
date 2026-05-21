@@ -113,7 +113,43 @@ def orchestrate_thumbnail_generation(
             except Exception as e:
                 logger.warning(f"DALL-E 3 failed: {e}")
         
-        # 2nd Attempt: Pollinations.ai Fallback with Smart Retries
+        # 2nd Attempt: Gemini Imagen 4.0 (State of the art 2026, 100% active, zero cost)
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not image_bytes and gemini_key:
+            api_used = "Gemini Imagen 4.0"
+            logger.info("Tentando geração via Gemini Imagen 4.0...")
+            try:
+                import base64
+                import requests
+                
+                # Remove request for text from prompt to ensure pristine image quality without gibberish
+                imagen_prompt = final_prompt.replace("5. MASSIVE BOLD TEXT: Include exactly 1 or 2 massive, legible, glowing words in a bold Sans-Serif font.", "5. NO TEXT: Do not include any text, letters, or words in the image.")
+                aspect_ratio = "9:16" if is_short else "16:9"
+                
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key={gemini_key}"
+                payload = {
+                    "instances": [{"prompt": imagen_prompt}],
+                    "parameters": {
+                        "sampleCount": 1,
+                        "aspectRatio": aspect_ratio,
+                        "outputMimeType": "image/jpeg"
+                    }
+                }
+                
+                response = requests.post(url, json=payload, timeout=30)
+                if response.status_code == 200:
+                    predictions = response.json().get("predictions", [])
+                    if predictions and "bytesBase64Encoded" in predictions[0]:
+                        image_bytes = base64.b64decode(predictions[0]["bytesBase64Encoded"])
+                        logger.info("Gemini Imagen 4.0 gerou a imagem com sucesso!")
+                    else:
+                        logger.warning("No image data in predictions for Gemini Imagen 4.0")
+                else:
+                    logger.warning(f"Gemini Imagen 4.0 falhou com status={response.status_code}: {response.text}")
+            except Exception as e:
+                logger.warning(f"Erro ao chamar Gemini Imagen 4.0: {e}")
+        
+        # 3rd Attempt: Pollinations.ai Fallback with Smart Retries (enhance=false to avoid timeouts)
         if not image_bytes:
             api_used = "Pollinations.ai"
             logger.info("Tentando fallback via Pollinations.ai com 2 tentativas...")
@@ -124,16 +160,16 @@ def orchestrate_thumbnail_generation(
                     import requests
                     
                     raw_prompt = thumb_data.get("prompt", "")
-                    hook_text = thumb_data.get("text", "")
                     
-                    # Removemos qualquer pedido de texto para a IA para evitar gibberish (ex: FIIRED FnED)
+                    # Removemos qualquer pedido de texto para a IA para evitar gibberish
                     if attempt == 1:
                         clean_prompt = f"YouTube thumbnail background, {title}, high contrast, no text, no letters, high quality"
                     else:
                         clean_prompt = f"A dramatic YouTube thumbnail background. Psychology triggers: extreme color contrast, shock facial expression looking at viewer, curiosity gap with red circle. NO TEXT, NO LETTERS. Visuals: " + raw_prompt.replace('\n', ' ').strip()
                     
                     safe_prompt = urllib.parse.quote(clean_prompt[:800])
-                    poll_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1280&height=720&nologo=true&enhance=true&seed={int(time.time()) + attempt}"
+                    w_poll, h_poll = (720, 1280) if is_short else (1280, 720)
+                    poll_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={w_poll}&height={h_poll}&nologo=true&enhance=false&seed={int(time.time()) + attempt}"
                     
                     headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

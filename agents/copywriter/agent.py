@@ -71,10 +71,12 @@ def run_copywriter_agent(niche_data_dict: dict) -> ScriptData:
         logger.info(f"🔄 [Copywriter Generator] Generation Attempt {attempt}/{max_attempts}...")
 
         # Monta prompt aplicando as diretrizes de delimitação XML e RAG
+        import math
         user_prompt = COPYWRITER_USER_PROMPT_TEMPLATE.format(
             niche_data=json.dumps(niche_data.model_dump(mode="json"), indent=2),
             language=niche_data.language or channel.language,
             target_duration=channel.target_duration_s,
+            min_scenes=math.ceil(channel.target_duration_s / 25),
             cpm=niche_data.estimated_cpm_usd,
             monetization_products=monetization_products.strip() or "No affiliate products available.",
         )
