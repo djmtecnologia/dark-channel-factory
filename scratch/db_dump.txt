@@ -1,0 +1,102 @@
+=== RECENT JOBS ===
+ID: 9c837c41-7a96-4750-9716-c38a92632795 | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 18:00:10.277516+00:00
+
+ID: e8bce2d0-7dff-4806-a97a-ebdd94b200b4 | Status: PENDING | Type: LONG | Topic: How AI is trading Renk stocks
+  URL: None
+  Error: None
+  Created At: 2026-05-26 17:56:54.999494+00:00
+
+ID: f8827c2d-f91b-4a13-b9af-63607a35fc3c | Status: DRAFTED | Type: LONG | Topic: La arquitectura de IA en tiempo real de Twitch que predice cada uno de tus movimientos
+  URL: None
+  Error: None
+  Created At: 2026-05-26 17:56:40.089684+00:00
+
+ID: ade1aa1c-3a6b-4c49-aa7a-1c06e3c19a0a | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 15:00:32.040593+00:00
+
+ID: 4bad5a8f-ef0c-4592-b222-4c0ab4f7a4f1 | Status: PENDING | Type: LONG | Topic: Siemens industrial AI system architecture explained
+  URL: None
+  Error: None
+  Created At: 2026-05-26 12:19:20.025454+00:00
+
+ID: 71d156df-c359-4fd6-9211-7703ea69260f | Status: DRAFTED | Type: LONG | Topic: El algoritmo prohibido que conduce este Tesla Model 3 por España sin conductor
+  URL: None
+  Error: None
+  Created At: 2026-05-26 12:19:08.698465+00:00
+
+ID: 0549d842-dd52-4e32-987a-e71e608ecaa2 | Status: DRAFTED | Type: LONG | Topic: L'algorithme de BNP Paribas qui a prédit Roland Garros 2026
+  URL: None
+  Error: None
+  Created At: 2026-05-26 12:18:57.765970+00:00
+
+ID: adc377ef-ee4b-4e48-8dee-2eddbda7209b | Status: DRAFTED | Type: LONG | Topic: The Military AI That Cracked Wall Street
+  URL: None
+  Error: None
+  Created At: 2026-05-26 12:18:45.105407+00:00
+
+ID: f99d2a85-d5af-4f0b-a61d-5957554d4095 | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 12:00:24.259404+00:00
+
+ID: 47fb9cb4-cc8e-4c83-a18a-50e0cfe0eb77 | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 09:00:38.289213+00:00
+
+ID: 359cce49-2e14-48cc-ad8a-62f64fdce871 | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 06:00:36.985853+00:00
+
+ID: 450a5648-e6ad-482e-96de-29a7431b7f6a | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 03:00:36.740089+00:00
+
+ID: 1638af66-878f-467e-ab1f-e6f375349b36 | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-26 00:00:37.604398+00:00
+
+ID: a32ac91d-bd92-463c-a803-52d51fa5ccfa | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-25 21:00:36.745192+00:00
+
+ID: 0d27f64a-9640-4584-8da7-466456724b9d | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-25 18:00:20.886453+00:00
+
+ID: 3f0405b1-2e53-4ca3-8db2-3010a2c3628d | Status: DRAFTED | Type: LONG | Topic: AI Money automation ideas
+  URL: None
+  Error: None
+  Created At: 2026-05-25 15:00:38.280227+00:00
+
+ID: 5df5f789-2112-4b1a-96f1-845eaebf4309 | Status: DRAFTED | Type: LONG | Topic: Das SAP-Geheimnis 2026: Wie SaaS-Architektur unsere Infrastruktur steuert
+  URL: None
+  Error: None
+  Created At: 2026-05-25 14:13:20.441959+00:00
+
+ID: 26e4af3e-081e-4cf0-b457-034b11c4c7a1 | Status: DRAFTED | Type: LONG | Topic: El algoritmo prohibido de Valdebebas: La IA que controla el Real Madrid
+  URL: None
+  Error: None
+  Created At: 2026-05-25 14:13:08.511349+00:00
+
+ID: 77d23026-44fa-4aad-b37d-8ef80973e898 | Status: DRAFTED | Type: LONG | Topic: L'IA secrète d'Equidia qui terrifie le PMU en 2026
+  URL: None
+  Error: None
+  Created At: 2026-05-25 14:12:56.035276+00:00
+
+ID: 69cbb682-cebd-4709-ab94-e250c388136b | Status: DRAFTED | Type: LONG | Topic: The Algorithm That Cornered the 2026 World Cup Tickets
+  URL: None
+  Error: None
+  Created At: 2026-05-25 14:12:43.115959+00:00
+
+=== RECENT VIDEOS IN VIDEOS TABLE ===

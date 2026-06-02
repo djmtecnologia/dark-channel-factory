@@ -10,7 +10,7 @@ def validate_youtube_studio_metadata(page, video_link, expected_title, scheduled
     try:
         video_id = video_link.split("/")[-1]
         edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
-        page.goto(edit_url, timeout=30000)
+        page.goto(edit_url, timeout=60000, wait_until="domcontentloaded")
         time.sleep(4)
         
         # 1. Valida Título
@@ -73,7 +73,12 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
         )
         
         page = browser.new_page()
-        page.goto("https://studio.youtube.com")
+        try:
+            print("🤖 [PLAYWRIGHT] Navegando para o YouTube Studio...")
+            page.goto("https://studio.youtube.com", timeout=60000, wait_until="domcontentloaded")
+        except Exception as goto_err:
+            print(f"⚠️ [PLAYWRIGHT] Alerta de lentidão/timeout na navegação inicial do studio.youtube.com: {goto_err}")
+            print("🔍 Verificando se a página já está utilizável ou se podemos continuar...")
         
         # Verifica se está logado
         if "accounts.google.com" in page.url or "signin" in page.url:
@@ -96,46 +101,46 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             print("📝 [PLAYWRIGHT] Preenchendo Título e Descrição...")
             time.sleep(4)
             
-            # Preenche o Título (Seletor universal via ID)
+            # Preenche o Título de forma altamente reativa via Keyboard
             print(f"📝 [PLAYWRIGHT] Preenchendo Título: {title[:50]}...")
             title_box = page.locator("#title-textarea #textbox")
             title_box.wait_for(state="visible", timeout=20000)
             title_box.scroll_into_view_if_needed()
+            
+            # Foco e limpeza via teclado
             title_box.click(force=True)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            title_box.fill(title[:100])
             time.sleep(1)
+            page.keyboard.press("Control+A")
+            time.sleep(0.5)
+            page.keyboard.press("Backspace")
+            time.sleep(0.5)
             
-            # Verificação de segurança para o Título
-            if not title_box.inner_text().strip():
-                print("⚠️ [PLAYWRIGHT] Fill falhou no Título, tentando Keyboard Type...")
-                page.keyboard.type(title[:100])
+            # Digitação física real que força o framework do YouTube a salvar os dados
+            page.keyboard.insert_text(title[:100])
+            time.sleep(2)
             
-            # Preenche a Descrição (Seletor universal via ID)
+            # Preenche a Descrição de forma altamente reativa via Keyboard
             print("📝 [PLAYWRIGHT] Preenchendo Descrição...")
             desc_box = page.locator("#description-textarea #textbox")
-            desc_box.wait_for(state="visible", timeout=10000)
+            desc_box.wait_for(state="visible", timeout=15000)
             desc_box.scroll_into_view_if_needed()
+            
+            # Foco e limpeza via teclado
             desc_box.click(force=True)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            desc_box.fill(description[:5000])
             time.sleep(1)
-
-            # Verificação de segurança para a Descrição
-            if not desc_box.inner_text().strip():
-                print("⚠️ [PLAYWRIGHT] Fill falhou na Descrição, tentando Keyboard Type...")
-                page.keyboard.type(description[:5000])
+            page.keyboard.press("Control+A")
+            time.sleep(0.5)
+            page.keyboard.press("Backspace")
+            time.sleep(0.5)
+            
+            # Digitação física real
+            page.keyboard.insert_text(description[:5000])
+            time.sleep(2)
             
             # Se for vídeo longo e tiver thumbnail
             if not is_short and thumbnail_path and os.path.exists(thumbnail_path):
                 print("🎨 [PLAYWRIGHT] Anexando Thumbnail...")
-                # BUG FIX: Must use the dedicated thumbnail input, NOT the generic file input
-                # which would overwrite the video upload
                 try:
-                    # Força a injeção do arquivo diretamente no input de upload nativo do YouTube
-                    # sem clicar no botão, o que evita a abertura da janela do Windows
                     page.locator("input#file-loader").set_input_files(thumbnail_path)
                     time.sleep(3)
                 except Exception as e:
@@ -143,22 +148,48 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             
             # Marca como "Não é para crianças" (Crucial para habilitar o botão Próximo)
             try:
-                # Usa busca textual robusta com suporte internacional (PT, EN, FR, ES, DE)
-                kids_not_made_radio = page.locator("tp-yt-paper-radio-button").filter(
-                    has_text=re.compile(r"não é conteúdo|not made for kids|pas conçue pour les enfants|no es contenido|nicht speziell für kinder", re.IGNORECASE)
-                ).first
-                kids_not_made_radio.wait_for(state="visible", timeout=15000)
-                kids_not_made_radio.scroll_into_view_if_needed()
-                kids_not_made_radio.click(force=True, timeout=5000)
-                print("✅ [PLAYWRIGHT] Restrição de idade configurada (DOM).")
+                print("👶 [PLAYWRIGHT] Configurando restrição de idade (Não é para crianças)...")
+                # Clique JS Universal: O segundo rádio é sempre o "Não"
+                kids_configured = page.evaluate("""
+                    () => {
+                        const radios = document.querySelectorAll('tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_FALSE"], tp-yt-paper-radio-button');
+                        for (const r of radios) {
+                            if (r.getAttribute('name') === 'VIDEO_MADE_FOR_KIDS_FALSE') {
+                                r.click();
+                                return true;
+                            }
+                        }
+                        const kidsRadios = Array.from(document.querySelectorAll('tp-yt-paper-radio-button')).filter(r => {
+                            const text = (r.innerText || '').toLowerCase();
+                            return text.includes('kids') || text.includes('criança') || text.includes('enfan') || text.includes('niño') || text.includes('kinder');
+                        });
+                        if (kidsRadios.length >= 2) {
+                            kidsRadios[1].click();
+                            return true;
+                        }
+                        for (const r of radios) {
+                            const text = (r.innerText || '').toLowerCase();
+                            if (text.includes('não') || text.includes('no') || text.includes('nicht') || text.includes('pas')) {
+                                r.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                if kids_configured:
+                    print("✅ [PLAYWRIGHT] Restrição de idade configurada via JS Inteligente.")
+                else:
+                    kids_not_made_radio = page.locator("tp-yt-paper-radio-button").filter(
+                        has_text=re.compile(r"não é conteúdo|not made for kids|pas conçue pour les enfants|no es contenido|nicht speziell für kinder", re.IGNORECASE)
+                    ).first
+                    kids_not_made_radio.wait_for(state="visible", timeout=8000)
+                    kids_not_made_radio.scroll_into_view_if_needed()
+                    kids_not_made_radio.click(force=True, timeout=5000)
+                    print("✅ [PLAYWRIGHT] Restrição de idade configurada via DOM.")
             except Exception as e:
-                # Fallback: tenta via Javascript se o clique direto falhar
-                try:
-                    page.evaluate("Array.from(document.querySelectorAll('tp-yt-paper-radio-button')).find(el => el.textContent.toLowerCase().includes('not made for kids') || el.textContent.toLowerCase().includes('não é conteúdo')).click()")
-                    print("✅ [PLAYWRIGHT] Restrição de idade configurada (JS Fallback).")
-                except:
-                    print(f"⚠️ [PLAYWRIGHT] Aviso: Não foi possível clicar na restrição de idade. ({e})")
-            
+                print(f"⚠️ [PLAYWRIGHT] Aviso ao configurar restrição de idade: {e}")
+
             # -------------------------------------------------------------
             # [NOVO] Adicionar Vídeo Relacionado (Somente para Shorts)
             # -------------------------------------------------------------
@@ -201,12 +232,42 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
                 
                 # Preenche Tags
                 if tags:
-                    tags_str = ", ".join(tags) + ","
-                    print(f"🏷️ Inserindo Tags: {tags_str[:50]}...")
-                    tags_box = page.locator("ytcp-free-text-chip-bar input").first
-                    tags_box.click(force=True)
-                    page.keyboard.insert_text(tags_str)
-                    time.sleep(1)
+                    # Limpa as tags existentes se houver chips de tags pré-carregados
+                    try:
+                        chips = page.locator("ytcp-chip").all()
+                        if chips:
+                            print(f"🗑️ [PLAYWRIGHT] Encontrados {len(chips)} chips de tags existentes. Limpando do zero...")
+                            for chip in chips:
+                                delete_btn = chip.locator("#delete-icon, [aria-label*='delete'], [aria-label*='remover'], button").first
+                                if delete_btn.is_visible():
+                                    delete_btn.click(force=True)
+                                    time.sleep(0.2)
+                    except Exception as e_clear:
+                        print(f"⚠️ [PLAYWRIGHT] Aviso ao tentar limpar tags existentes: {e_clear}")
+
+                    # Valida e recorta as tags para garantir limite máximo estrito de 500 caracteres
+                    valid_tags = []
+                    current_length = 0
+                    for tag in tags:
+                        tag_str = tag.strip()
+                        if not tag_str:
+                            continue
+                        added_len = len(tag_str) + (2 if valid_tags else 0)
+                        # O YouTube também adiciona uma vírgula final na caixa, então mantemos margem segura de 495 caracteres
+                        if current_length + added_len <= 495:
+                            valid_tags.append(tag_str)
+                            current_length += added_len
+                        else:
+                            print(f"⚠️ [PLAYWRIGHT] Limite de 500 caracteres de tags atingido. Ignorando tag '{tag_str}' e subsequentes.")
+                            break
+
+                    if valid_tags:
+                        tags_str = ", ".join(valid_tags) + ","
+                        print(f"🏷️ Inserindo Tags (comprimento: {len(tags_str)} caracteres): {tags_str[:100]}...")
+                        tags_box = page.locator("ytcp-free-text-chip-bar input").first
+                        tags_box.click(force=True)
+                        page.keyboard.insert_text(tags_str)
+                        time.sleep(1)
                 
                 # Preenche Idioma do Vídeo
                 lang_map = {
@@ -375,8 +436,6 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             if not is_short:
                 try:
                     print("📺 [PLAYWRIGHT] Adicionando Tela Final...")
-                    # Estratégia 1: Busca pela linha da Tela Final com timeout
-                    endscreen_found = False
                     try:
                         page.wait_for_selector(
                             "ytcp-video-elements-row",
@@ -386,7 +445,6 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
                             has_text=re.compile(r"tela final|end screen|endscreen|\u00e9cran de fin|pantalla final|abspann", re.IGNORECASE)
                         ).first
                         if endscreen_row.is_visible(timeout=3000):
-                            endscreen_found = True
                             import_btn = endscreen_row.locator("#import-button").first
                             if import_btn.is_visible(timeout=2000):
                                 import_btn.click(force=True)
@@ -420,122 +478,180 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
                     print(f"   ℹ️ [INFO] Tela Final ignorada: {e}")
                     page.keyboard.press("Escape")
 
-
             # Avança até a aba de Visibilidade (Adaptativo para Monetização, Shorts e Longos)
             print("⏭️ [PLAYWRIGHT] Avançando para a aba Visibilidade (Agendamento)...")
             for step_attempt in range(10):
-                # Critério de parada: o botão 'Next' não está mais disponível ou estamos explicitamente na última aba
-                next_btn = page.locator("ytcp-button#next-button").first
-                vis_check  = page.locator("ytcp-visibility-radios, ytcp-video-visibility").first
-                
-                if (not next_btn.is_visible() or next_btn.get_attribute("disabled") is not None or next_btn.get_attribute("aria-disabled") == "true") and vis_check.is_visible():
+                time.sleep(3)
+                vis_check = page.locator("ytcp-visibility-radios, ytcp-video-visibility").first
+                if vis_check.is_visible():
+                    print("✅ [PLAYWRIGHT] Chegamos à aba de Visibilidade!")
                     break
                 
-                if not next_btn.is_visible() and step_attempt > 2:
-                    break
+                # Tenta clicar no botão Next que está visível na interface atual
+                step_clicked = page.evaluate("""
+                    () => {
+                        const nextBtns = Array.from(document.querySelectorAll('ytcp-button#next-button'));
+                        const visibleNext = nextBtns.find(b => {
+                            if (b.hasAttribute('hidden') || b.getAttribute('aria-hidden') === 'true') return false;
+                            const rect = b.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0 && window.getComputedStyle(b).display !== 'none';
+                        });
+                        
+                        if (visibleNext) {
+                            const is_disabled = visibleNext.hasAttribute('disabled') || visibleNext.getAttribute('aria-disabled') === 'true';
+                            if (!is_disabled) {
+                                visibleNext.click();
+                                return 'clicked';
+                            }
+                            return 'disabled';
+                        }
+                        return 'not_found';
+                    }
+                """)
                 
-                # Libera focos ou modais travados
-                page.keyboard.press("Escape")
+                print(f"   ⏭️ Avanço de aba (Etapa {step_attempt + 1}): status={step_clicked}")
                 
-                # Tratamento de Monetização e Ad Suitability (caso o canal seja monetizado)
-                try:
-                    if page.locator("ytcp-video-monetization").is_visible():
-                        page.locator("tp-yt-paper-radio-button[name='MONETIZATION_ON']").first.click(force=True)
-                        time.sleep(1)
-                except: pass
-
-                try:
-                    if page.locator("ytcp-video-ad-suitability").is_visible():
-                        none_checkbox = page.locator("ytcp-checkbox-lit").filter(has_text=re.compile(r"nenhuma|none of the above|aucune|ninguna|keine", re.IGNORECASE)).first
-                        if none_checkbox.is_visible():
-                            none_checkbox.click(force=True)
-                            time.sleep(1)
-                            page.locator("ytcp-button#submit-questionnaire-button").first.click(force=True)
-                            time.sleep(2)
-                except: pass
-
-                try:
-                    next_btn = page.locator("ytcp-button#next-button").first
-                    if next_btn.is_visible() and next_btn.get_attribute("disabled") is None and next_btn.get_attribute("aria-disabled") != "true":
-                        next_btn.click(force=True)
+                if step_clicked == 'disabled':
+                    print("   ⏳ [PLAYWRIGHT] Botão 'Próximo' está temporariamente desabilitado. Aguardando processamento da aba...")
+                    time.sleep(5)
+                
+                # Se não encontrar o botão ou se as tentativas consecutivas falharem, usa o clique direto nos cabeçalhos como atalho supremo
+                if step_attempt >= 3 or step_clicked == 'not_found':
+                    print("   🔄 [PLAYWRIGHT] Tentando atalho direto clicando nos steps de cabeçalho no topo...")
+                    stepper_clicked = page.evaluate("""
+                        () => {
+                            const steps = Array.from(document.querySelectorAll('tp-yt-paper-step, ytcp-stepper-item, .step'));
+                            const targetStep = steps.find(s => {
+                                const t = (s.innerText || '').toLowerCase();
+                                return t.includes('visib') || t.includes('sicht') || t.includes('programar') || t.includes('agend') || t.includes('public');
+                            });
+                            if (targetStep) {
+                                targetStep.click();
+                                return true;
+                            }
+                            // Tenta clicar no último step disponível no cabeçalho
+                            if (steps.length > 0) {
+                                steps[steps.length - 1].click();
+                                return true;
+                            }
+                            return false;
+                        }
+                    """)
+                    if stepper_clicked:
+                        print("   ✅ [PLAYWRIGHT] Atalho de Stepper acionado via JS.")
                         time.sleep(2)
-                    else:
-                        # Fallback Supremo: Força clique diretamente no Step de Visibilidade no topo
-                        visibility_step = page.locator("tp-yt-paper-step").filter(has_text=re.compile(r"visibilidade|visibility|visibilit\u00e9|visibilidad|sichtbarkeit", re.IGNORECASE)).first
-                        if visibility_step.is_visible():
-                            visibility_step.click(force=True)
-                        time.sleep(1)
-                except: pass
-            
+
             # Define visibilidade
             print("👁️ [PLAYWRIGHT] Configurando visibilidade/agendamento...")
             if scheduled_at:
                 print(f"📅 [PLAYWRIGHT] Agendando vídeo para {scheduled_at.strftime('%d/%m/%Y %H:%M')}...")
                 time.sleep(5)
                 
-                # YouTube 2026 UI: Precisa expandir a seção "Programar" antes de ver o rádio
+                # YouTube UI: Expande a seção de agendamento de forma altamente resiliente via JS
                 try:
                     print("📂 [PLAYWRIGHT] Expandindo seção de Agendamento...")
-                    # Localiza o container da seção de agendamento ou o rádio se já visível
-                    expand_sched = page.locator("#schedule-section, ytcp-video-visibility-select-step #schedule-radio-button, [name='SCHEDULE']").first
-                    expand_sched.click(force=True)
-                    time.sleep(2)
+                    time.sleep(4)
+                    expanded = page.evaluate("""
+                        () => {
+                            const allDivs = Array.from(document.querySelectorAll('div, ytcp-button, ytcp-video-visibility-select-step'));
+                            const scheduleHeader = allDivs.find(d => {
+                                const t = (d.innerText || '').toLowerCase();
+                                return (t.includes('schedule') || t.includes('programar') || t.includes('agendar')) && d.querySelector('#second-container-expand-button, #schedule-section');
+                            });
+                            if (scheduleHeader) {
+                                const btn = scheduleHeader.querySelector('#second-container-expand-button, #schedule-section, [role="button"]');
+                                if (btn) { btn.click(); return true; }
+                                scheduleHeader.click();
+                                return true;
+                            }
+                            const expandBtn = document.querySelector('#second-container-expand-button, #schedule-section');
+                            if (expandBtn) { expandBtn.click(); return true; }
+                            return false;
+                        }
+                    """)
+                    if expanded:
+                        print("   ✅ Seção de Agendamento expandida via JS.")
+                    else:
+                        expand_sched = page.locator("#schedule-section, #second-container-expand-button, ytcp-video-visibility-select-step #schedule-radio-button, [name='SCHEDULE']").first
+                        expand_sched.click(force=True)
+                    time.sleep(3)
                 except Exception as e:
                     print(f"   ℹ️ [PLAYWRIGHT] Info: Tentativa de expansão ignorada ({e})")
 
-                # Estratégia 1: Busca Recursiva no Shadow DOM
-                sched_clicked = page.evaluate("""
-                    () => {
-                        function findAndClick(root) {
-                            // 1. Tenta seletores conhecidos
-                            const selectors = [
-                                'tp-yt-paper-radio-button#schedule-radio-button',
-                                'ytcp-paper-radio-button[name="SCHEDULE"]',
-                                '#schedule-radio-button',
-                                '[name="SCHEDULE"]',
-                                '[value="SCHEDULE"]'
-                            ];
-                            for (const sel of selectors) {
-                                const el = root.querySelector(sel);
-                                if (el && el.offsetParent !== null) { 
-                                    el.click(); 
-                                    return true; 
-                                }
-                            }
-                            // 2. Busca por texto se o seletor falhar
-                            const allRadios = Array.from(root.querySelectorAll('tp-yt-paper-radio-button, [role="radio"]'));
-                            const target = allRadios.find(r => {
-                                const t = (r.innerText || '').toLowerCase();
-                                return t.includes('sched') || t.includes('prog') || t.includes('agen') || t.includes('plan');
-                            });
-                            if (target && target.offsetParent !== null) { 
-                                target.click(); 
-                                return true; 
+                # Verifica se os inputs de data e hora já estão visíveis/ativos após expandir
+                date_input_test = page.locator("ytcp-date-picker input").first
+                time_input_test = page.locator("ytcp-time-of-day-picker input").first
+                
+                if date_input_test.is_visible() or time_input_test.is_visible():
+                    print("   ✅ [PLAYWRIGHT] Campos de agendamento já estão visíveis e ativos. Pulando clique no rádio.")
+                    sched_clicked = True
+                else:
+                    # Estratégia 1: Busca Recursiva no Shadow DOM sem a restrição de offsetParent
+                    sched_clicked = page.evaluate("""
+                        () => {
+                            function isVisible(el) {
+                                if (!el) return false;
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width === 0 && rect.height === 0) return false;
+                                const style = window.getComputedStyle(el);
+                                return style.display !== 'none' && style.visibility !== 'hidden';
                             }
                             
-                            // 3. Recursão para Shadow Roots
-                            const children = Array.from(root.querySelectorAll('*'));
-                            for (const child of children) {
-                                if (child.shadowRoot && findAndClick(child.shadowRoot)) return true;
+                            function findAndClick(root) {
+                                // 1. Tenta seletores conhecidos
+                                const selectors = [
+                                    'tp-yt-paper-radio-button#schedule-radio-button',
+                                    'ytcp-paper-radio-button[name="SCHEDULE"]',
+                                    '#schedule-radio-button',
+                                    '[name="SCHEDULE"]',
+                                    '[value="SCHEDULE"]'
+                                ];
+                                for (const sel of selectors) {
+                                    const el = root.querySelector(sel);
+                                    if (el && isVisible(el)) { 
+                                        el.click(); 
+                                        return true; 
+                                    }
+                                }
+                                // 2. Busca por texto se o seletor falhar
+                                const allRadios = Array.from(root.querySelectorAll('tp-yt-paper-radio-button, [role="radio"]'));
+                                const target = allRadios.find(r => {
+                                    const t = (r.innerText || '').toLowerCase();
+                                    return t.includes('sched') || t.includes('prog') || t.includes('agen') || t.includes('plan');
+                                });
+                                if (target && isVisible(target)) { 
+                                    target.click(); 
+                                    return true; 
+                                }
+                                
+                                // 3. Recursão para Shadow Roots
+                                const children = Array.from(root.querySelectorAll('*'));
+                                for (const child of children) {
+                                    if (child.shadowRoot && findAndClick(child.shadowRoot)) return true;
+                                }
+                                return false;
                             }
-                            return false;
+                            return findAndClick(document);
                         }
-                        return findAndClick(document);
-                    }
-                """)
-                
-                if not sched_clicked:
-                    print("⚠️ [PLAYWRIGHT] JS não encontrou radio, tentando via locator...")
-                    try:
-                        sched_loc = page.locator("[name='SCHEDULE'], #schedule-radio-button, [value='SCHEDULE']").first
-                        sched_loc.scroll_into_view_if_needed(timeout=10000)
-                        sched_loc.click(force=True)
-                        sched_clicked = 'locator'
-                    except Exception as e2:
-                        print(f"⚠️ [PLAYWRIGHT] Fallback também falhou: {e2}. Publicando como Público direto.")
-                        page.evaluate("document.querySelectorAll('tp-yt-paper-radio-button, [role=radio]').forEach(r => { if((r.innerText||'').toLowerCase().includes('public') || (r.innerText||'').toLowerCase().includes('p\u00fablico')) r.click(); })")
-                else:
-                    print(f"✅ [PLAYWRIGHT] Agendamento selecionado via JS.")
+                    """)
+                    
+                    if not sched_clicked:
+                        print("⚠️ [PLAYWRIGHT] JS não encontrou radio, tentando via locator...")
+                        try:
+                            sched_loc = page.locator("[name='SCHEDULE'], #schedule-radio-button, [value='SCHEDULE']").first
+                            sched_loc.scroll_into_view_if_needed(timeout=10000)
+                            sched_loc.click(force=True)
+                            sched_clicked = 'locator'
+                        except Exception as e2:
+                            # Se os inputs de data ou hora estiverem presentes de qualquer forma, consideramos sucesso
+                            if date_input_test.count() > 0 or time_input_test.count() > 0:
+                                print("   ✅ [PLAYWRIGHT] Inputs de data/hora detectados no DOM após falha do rádio. Prosseguindo...")
+                                sched_clicked = 'fallback_elements'
+                            else:
+                                print(f"⚠️ [PLAYWRIGHT] Fallback também falhou: {e2}. Publicando como Público direto.")
+                                page.evaluate("document.querySelectorAll('tp-yt-paper-radio-button, [role=radio]').forEach(r => { if((r.innerText||'').toLowerCase().includes('public') || (r.innerText||'').toLowerCase().includes('p\u00fablico')) r.click(); })")
+                    else:
+                        print(f"✅ [PLAYWRIGHT] Agendamento selecionado via JS.")
                 
                 time.sleep(2)
                 
@@ -651,16 +767,27 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
             
             if not video_link:
                 try:
-                    # Seletor 4: Navega para a lista de vídeos e pega o mais recente
-                    page.goto("https://studio.youtube.com/channel/content", timeout=15000)
-                    time.sleep(3)
-                    first_row_link = page.locator("ytcp-video-list-cell-title a").first.get_attribute("href", timeout=5000)
-                    if first_row_link:
-                        vid_match = _re.search(r'v=([a-zA-Z0-9_-]+)', first_row_link)
-                        if vid_match:
-                            video_link = f"https://www.youtube.com/watch?v={vid_match.group(1)}"
-                            print(f"   ℹ️ Link extraído da lista de conteúdo: {video_link}")
-                except: pass
+                    # Seletor 4: Navega para a lista de vídeos e pega o mais recente, validando o título
+                    page.goto("https://studio.youtube.com/channel/content", timeout=30000, wait_until="domcontentloaded")
+                    time.sleep(4)
+                    
+                    # Verifica se o primeiro título na lista de vídeos bate com o título atual
+                    first_row_title_el = page.locator("ytcp-video-list-cell-title #video-title").first
+                    if first_row_title_el.is_visible():
+                        actual_row_title = first_row_title_el.inner_text().strip().lower()
+                        expected_title_lower = title.strip().lower()
+                        # Verifica se há sobreposição de títulos para ter certeza de que é o mesmo vídeo
+                        if actual_row_title in expected_title_lower or expected_title_lower in actual_row_title:
+                            first_row_link = page.locator("ytcp-video-list-cell-title a").first.get_attribute("href", timeout=5000)
+                            if first_row_link:
+                                vid_match = _re.search(r'v=([a-zA-Z0-9_-]+)', first_row_link)
+                                if vid_match:
+                                    video_link = f"https://www.youtube.com/watch?v={vid_match.group(1)}"
+                                    print(f"   ℹ️ Link verificado extraído da lista de conteúdo: {video_link}")
+                        else:
+                            print(f"   ⚠️ [PLAYWRIGHT] O vídeo no topo da lista ({actual_row_title}) não corresponde ao título atual ({expected_title_lower}). Evitando publicação de comentário no vídeo errado!")
+                except Exception as e:
+                    print(f"   ⚠️ Erro ao extrair link verificado da lista de conteúdo: {e}")
             
             # Fecha o popup de share se existir
             try:
@@ -678,7 +805,7 @@ def publish_video_to_youtube(video_path, thumbnail_path, title, description, tag
                     if is_short:
                         print("   ℹ️ [INFO] Shorts não suportam pin de comentário instantâneo via desktop UI. Ignorado.")
                     else:
-                        page.goto(video_link, timeout=30000)
+                        page.goto(video_link, timeout=60000, wait_until="domcontentloaded")
                         time.sleep(4)
                         # Check if comments box is available (Video might be 'Processing')
                         if page.locator("#placeholder-area").is_visible(timeout=5000):

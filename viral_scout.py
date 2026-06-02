@@ -57,7 +57,32 @@ class ViralScout:
 
             print(f"🔥 [TRENDS] Top Assuntos nas últimas 24h ({region}): {top_trends[:3]}...")
             
-            # Chama a IA para conectar a tendência viral com o nosso nicho (Bridge)
+            # ── [FinOps] Bridging Programático Determinístico a Custo Zero de IA ──
+            enable_ai_bridging = os.getenv("ENABLE_AI_BRIDGING", "false").lower() == "true"
+            
+            if not enable_ai_bridging:
+                import random
+                # Seleciona a melhor tendência do feed
+                chosen_trend = top_trends[0] if top_trends else "New Technologies"
+                
+                # Coleção de templates clickbait de altíssimo impacto para YouTube (Clean & High-CTR)
+                templates = [
+                    "How {trend} Is Changing The Future of {niche}",
+                    "Why {trend} Is The Ultimate Hack For {niche}",
+                    "How {niche} Is Predicting The Rise of {trend}",
+                    "The Secrets Behind {trend} and {niche} in 2026",
+                    "{trend} Meets {niche}: The 2026 Business Revolution",
+                    "Why {trend} Is Accelerating The Growth of {niche}",
+                    "How {niche} Solves The Main Crisis of {trend}"
+                ]
+                
+                # Conecta de forma limpa e inteligente
+                template = random.choice(templates)
+                bridged_topic = template.format(trend=chosen_trend, niche=niche)
+                print(f"🧠 [Programmatic Bridge] Tópico Híbrido Criado a Custo Zero: '{bridged_topic}'")
+                return bridged_topic
+            
+            # Caso contrário, tenta conectar via Inteligência Artificial
             try:
                 import sys
                 from shared.ai_orchestrator import AIOrchestrator

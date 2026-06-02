@@ -104,18 +104,47 @@ def orchestrate_thumbnail_generation(
         llm = get_llm_client()
         image_bytes = None
 
-        # 1st Attempt: DALL-E 3
-        if llm._openai_client:
-            try:
-                # Remove request for text from DALL-E prompt
-                dalle_prompt = final_prompt.replace("5. MASSIVE BOLD TEXT: Include exactly 1 or 2 massive, legible, glowing words in a bold Sans-Serif font.", "5. NO TEXT: Do not include any text, letters, or words in the image.")
-                image_bytes = llm.generate_image(dalle_prompt)
-            except Exception as e:
-                logger.warning(f"DALL-E 3 failed: {e}")
-        
-        # 2nd Attempt: Gemini Imagen 4.0 (State of the art 2026, 100% active, zero cost)
+        # 1st Attempt: Pollinations.ai (100% Free, Dynamic, High Quality)
+        if not image_bytes:
+            api_used = "Pollinations.ai"
+            logger.info("Tentando geração via Pollinations.ai com 2 tentativas...")
+            
+            for attempt in range(2):
+                try:
+                    import urllib.parse
+                    import requests
+                    
+                    raw_prompt = thumb_data.get("prompt", "")
+                    
+                    # Removemos qualquer pedido de texto para a IA para evitar gibberish
+                    if attempt == 1:
+                        clean_prompt = f"YouTube thumbnail background, {title}, high contrast, no text, no letters, high quality"
+                    else:
+                        clean_prompt = f"A dramatic YouTube thumbnail background. Psychology triggers: extreme color contrast, shock facial expression looking at viewer, curiosity gap with red circle. NO TEXT, NO LETTERS. Visuals: " + raw_prompt.replace('\n', ' ').strip()
+                    
+                    safe_prompt = urllib.parse.quote(clean_prompt[:800])
+                    w_poll, h_poll = (720, 1280) if is_short else (1280, 720)
+                    poll_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={w_poll}&height={h_poll}&nologo=true&enhance=false&seed={int(time.time()) + attempt}"
+                    
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                    response = requests.get(poll_url, headers=headers, timeout=30)
+                    if response.status_code == 200 and len(response.content) > 10000:
+                        image_bytes = response.content
+                        logger.info("Pollinations.ai gerou a imagem com sucesso!")
+                        break
+                    else:
+                        logger.warning(f"Pollinations.ai falhou (Tentativa {attempt+1}) com status={response.status_code}")
+                except Exception as e:
+                    logger.warning(f"Erro na tentativa {attempt+1} do Pollinations: {e}")
+                time.sleep(2)
+
+        # 2nd Attempt: Gemini Imagen 4.0 (State of the art 2026, controlled by ENABLE_GEMINI_IMAGEN flag to save costs)
         gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-        if not image_bytes and gemini_key:
+        enable_gemini_imagen = os.getenv("ENABLE_GEMINI_IMAGEN", "false").lower() == "true"
+        
+        if not image_bytes and gemini_key and enable_gemini_imagen:
             api_used = "Gemini Imagen 4.0"
             logger.info("Tentando geração via Gemini Imagen 4.0...")
             try:
@@ -148,42 +177,20 @@ def orchestrate_thumbnail_generation(
                     logger.warning(f"Gemini Imagen 4.0 falhou com status={response.status_code}: {response.text}")
             except Exception as e:
                 logger.warning(f"Erro ao chamar Gemini Imagen 4.0: {e}")
+        elif not image_bytes and not enable_gemini_imagen:
+            logger.info("Geração via Gemini Imagen 4.0 pulada por estar desativada no .env (FinOps Cost Saving).")
         
-        # 3rd Attempt: Pollinations.ai Fallback with Smart Retries (enhance=false to avoid timeouts)
-        if not image_bytes:
-            api_used = "Pollinations.ai"
-            logger.info("Tentando fallback via Pollinations.ai com 2 tentativas...")
-            
-            for attempt in range(2):
-                try:
-                    import urllib.parse
-                    import requests
-                    
-                    raw_prompt = thumb_data.get("prompt", "")
-                    
-                    # Removemos qualquer pedido de texto para a IA para evitar gibberish
-                    if attempt == 1:
-                        clean_prompt = f"YouTube thumbnail background, {title}, high contrast, no text, no letters, high quality"
-                    else:
-                        clean_prompt = f"A dramatic YouTube thumbnail background. Psychology triggers: extreme color contrast, shock facial expression looking at viewer, curiosity gap with red circle. NO TEXT, NO LETTERS. Visuals: " + raw_prompt.replace('\n', ' ').strip()
-                    
-                    safe_prompt = urllib.parse.quote(clean_prompt[:800])
-                    w_poll, h_poll = (720, 1280) if is_short else (1280, 720)
-                    poll_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={w_poll}&height={h_poll}&nologo=true&enhance=false&seed={int(time.time()) + attempt}"
-                    
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    }
-                    response = requests.get(poll_url, headers=headers, timeout=30)
-                    if response.status_code == 200 and len(response.content) > 10000:
-                        image_bytes = response.content
-                        break
-                    else:
-                        logger.warning(f"Pollinations.ai falhou (Tentativa {attempt+1}) com status={response.status_code}")
-                except Exception as e:
-                    logger.warning(f"Erro na tentativa {attempt+1} do Pollinations: {e}")
-                time.sleep(2)
-
+        # 3rd Attempt: gpt-image-1 (OpenAI DALL-E 3)
+        if not image_bytes and llm._openai_client:
+            try:
+                api_used = "DALL-E 3"
+                logger.info("Tentando geração via OpenAI DALL-E 3...")
+                # Remove request for text from prompt
+                dalle_prompt = final_prompt.replace("5. MASSIVE BOLD TEXT: Include exactly 1 or 2 massive, legible, glowing words in a bold Sans-Serif font.", "5. NO TEXT: Do not include any text, letters, or words in the image.")
+                image_bytes = llm.generate_image(dalle_prompt)
+            except Exception as e:
+                logger.warning(f"gpt-image-1 failed: {e}")
+        
         # Se obteve a imagem de qualquer uma das APIs, salva e aplica o texto perfeitamente via PIL
         if image_bytes:
             with open(output_path, "wb") as f:
@@ -320,19 +327,41 @@ def _generate_video_frame_fallback(video_path: str, output_path: str, text: str)
     """
     try:
         import subprocess
+        import re
         from PIL import Image, ImageDraw, ImageFont
         
-        # 1. Extrai frame do vídeo (scale + correção de cor) via FFmpeg
-        # Avança 30 segundos para garantir que pega uma cena real (evita fundos pretos do início)
-        vf = "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,eq=contrast=1.2:saturation=1.4"
-        cmd = f'ffmpeg -ss 00:00:30 -i "{video_path}" -vframes 1 -vf "{vf}" -q:v 2 "{output_path}" -y'
+        # 1. Detecta duração real do vídeo para calcular o ponto de extração
+        dur_cmd = f'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "{video_path}"'
+        dur_result = subprocess.run(dur_cmd, shell=True, capture_output=True, text=True)
+        try:
+            video_duration = float(dur_result.stdout.strip())
+        except (ValueError, AttributeError):
+            video_duration = 10.0
         
-        res = subprocess.run(cmd, shell=True, capture_output=True)
+        # Busca no terço médio do vídeo (evita preto do início e créditos do final)
+        seek_time = max(1, min(video_duration * 0.33, video_duration - 2))
+        
+        # 2. Extrai frame com flags que resolvem o erro de YUV range
+        vf = "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,eq=contrast=1.2:saturation=1.4,format=yuvj420p"
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(seek_time),
+            "-i", video_path,
+            "-frames:v", "1",
+            "-vf", vf,
+            "-strict", "unofficial",
+            output_path
+        ]
+        
+        res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
-            logger.error(f"FFmpeg extract failed: {res.stderr.decode('utf-8', errors='ignore')}")
-            return False
+            # Retry com seek menor (para vídeos curtos)
+            cmd[4] = "1"  # -ss 1
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                logger.error(f"FFmpeg extract failed: {res.stderr[:300]}")
+                return False
 
-        # 2. Adiciona os elementos de design (tarja e texto) via Pillow
+        # 3. Adiciona os elementos de design (tarja e texto) via Pillow
         if os.path.exists(output_path):
             img = Image.open(output_path).convert("RGBA")
             
@@ -360,13 +389,21 @@ def _generate_video_frame_fallback(video_path: str, output_path: str, text: str)
             # Texto centralizado
             draw.text((1280//2, 720//2), text, font=font, fill="yellow", anchor="mm", stroke_width=4, stroke_fill="black")
             
-            img.convert("RGB").save(output_path, "JPEG", quality=90)
+            # Adiciona ruído sutil no frame de vídeo para textura cinematográfica extra e evitar compressão excessiva
+            try:
+                grain = Image.effect_noise((1280, 720), 8).convert("RGB")
+                img = Image.blend(img.convert("RGB"), grain, 0.05).convert("RGBA")
+            except Exception:
+                pass
+            
+            img.convert("RGB").save(output_path, "JPEG", quality=96)
             return True
             
         return False
     except Exception as e:
         logger.error(f"Video frame fallback failed: {e}")
         return False
+
 
 def _generate_gradient_fallback(output_path: str, text: str, is_short: bool = False) -> bool:
     """
@@ -393,12 +430,25 @@ def _generate_gradient_fallback(output_path: str, text: str, is_short: bool = Fa
             draw.line([(0, i), (w, i)], fill=(r, g, b))
             
         # 2. Adiciona "Partículas" de Bokeh para profundidade
-        for _ in range(15):
+        for _ in range(25): # Aumentado de 15 para 25 para maior riqueza visual
             x, y = random.randint(0, w), random.randint(0, h)
-            size = random.randint(50, 300)
-            draw.ellipse([x-size, y-size, x+size, y+size], fill=(255, 255, 255, 20))
+            size = random.randint(40, 250)
+            draw.ellipse([x-size, y-size, x+size, y+size], fill=(255, 255, 255, 25))
             
-        img = img.filter(ImageFilter.GaussianBlur(radius=20))
+        img = img.filter(ImageFilter.GaussianBlur(radius=15)) # Reduzido radius de 20 para 15 para manter texturas mais nítidas e ricas
+        
+        # Adiciona grão analógico/cinemático sutil para elevar textura dopaminérgica e tamanho do arquivo (entropia de alta frequência)
+        try:
+            grain = Image.effect_noise((w, h), 12).convert("RGB")
+            img = Image.blend(img, grain, 0.08) # 8% de grão analógico cinemático
+        except Exception:
+            # Fallback seguro de ruído de pixel caso effect_noise não esteja disponível
+            draw_grain = ImageDraw.Draw(img)
+            for _ in range(w * h // 200):
+                rx, ry = random.randint(0, w-1), random.randint(0, h-1)
+                r_offset = random.randint(-15, 15)
+                draw_grain.point((rx, ry), fill=(128+r_offset, 128+r_offset, 128+r_offset))
+                
         draw = ImageDraw.Draw(img)
         
         # 3. Tipografia de Alto Impacto

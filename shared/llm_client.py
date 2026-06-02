@@ -243,24 +243,33 @@ class LLMClient:
         return LLMResponse(text=mock_json, model_used="mock", tokens_used=0)
 
     def generate_image(self, prompt: str, size: str = "1792x1024") -> bytes | None:
-        """Gera imagem via DALL-E 3 (OpenAI) para thumbnails."""
+        """Gera imagem via OpenAI gpt-image-1 para thumbnails."""
         if not self._openai_client:
             logger.error("OpenAI client required for image generation")
             return None
         try:
             response = self._openai_client.images.generate(
-                model="dall-e-3",
+                model="gpt-image-1",
                 prompt=prompt,
                 size=size,  # type: ignore
-                quality="hd",
+                quality="high",
                 n=1,
             )
-            import requests as req
+            # gpt-image-1 returns base64 by default
+            import base64
+            b64_data = response.data[0].b64_json
+            if b64_data:
+                logger.info(f"✓ gpt-image-1 image generated ({size})")
+                return base64.b64decode(b64_data)
+            # Fallback: URL-based response
             image_url = response.data[0].url
-            img_response = req.get(image_url, timeout=30)
-            img_response.raise_for_status()
-            logger.info(f"✓ DALL-E 3 image generated ({size})")
-            return img_response.content
+            if image_url:
+                import requests as req
+                img_response = req.get(image_url, timeout=30)
+                img_response.raise_for_status()
+                logger.info(f"✓ gpt-image-1 image generated via URL ({size})")
+                return img_response.content
+            return None
         except Exception as e:
             logger.error(f"Image generation failed: {e}")
             return None

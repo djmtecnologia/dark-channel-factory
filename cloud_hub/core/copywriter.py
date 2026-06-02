@@ -307,45 +307,63 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
 
     final_links = []
     
-    # Busca ClickBank (Prioridade US)
-    if channel.language == "en-US":
-        try:
-            from agents.monetization.clickbank_scout import ClickBankScout
-            scout_cb = ClickBankScout(session)
-            cb_prod = scout_cb.find_and_cache_product(job.topic, channel.niche, channel.language, channel.tenant_id)
-            if cb_prod:
-                cb_url = inject_tracking_link(cb_prod, job.id, channel.id)
-                if test_link_safe(cb_url):
-                    final_links.append(f"🔥 Recommended Tool/Software: {cb_url}")
-        except Exception as e:
-            print(f"⚠️ Erro no ClickBank Scout: {e}")
+    # ── [NOVO] Links de Afiliado Fixos por Idioma via .env ──
+    import os
+    lang_key = channel.language.upper().replace("-", "_")  # Ex: EN_US
+    base_lang_key = channel.language.split("-")[0].upper() # Ex: EN
+    
+    fixed_link_env = os.getenv(f"AFFILIATE_LINK_{lang_key}") or os.getenv(f"AFFILIATE_LINK_{base_lang_key}")
+    if fixed_link_env:
+        print(f"🎯 [MONETIZAÇÃO FIXA] Links fixos detectados no .env para {channel.language}: {fixed_link_env}")
+        for link in fixed_link_env.split(","):
+            link = link.strip()
+            if link:
+                # Garante um prefixo persuasivo elegante caso o usuário forneça link limpo
+                if not any(prefix in link for prefix in ["🔥", "🚀", "📚", "💎", "👉", "Learn More:"]):
+                    final_links.append(f"👉 Recommended Link: {link}")
+                else:
+                    final_links.append(link)
+                    
+    if not final_links:
+        # Busca ClickBank (Prioridade US)
+        if channel.language == "en-US":
+            try:
+                from agents.monetization.clickbank_scout import ClickBankScout
+                scout_cb = ClickBankScout(session)
+                cb_prod = scout_cb.find_and_cache_product(job.topic, channel.niche, channel.language, channel.tenant_id)
+                if cb_prod:
+                    cb_url = inject_tracking_link(cb_prod, job.id, channel.id)
+                    if test_link_safe(cb_url):
+                        final_links.append(f"🔥 Recommended Tool/Software: {cb_url}")
+            except Exception as e:
+                print(f"⚠️ Erro no ClickBank Scout: {e}")
 
-    # Busca Digistore24 (Prioridade Europa/International)
-    if channel.language in ["fr-FR", "es-ES", "de-DE", "en-GB"]:
-        try:
-            from agents.monetization.digistore_scout import DigistoreScout
-            scout_dg = DigistoreScout(session)
-            dg_prod = scout_dg.find_and_cache_product(job.topic, channel.niche, channel.language, channel.tenant_id)
-            if dg_prod:
-                dg_url = inject_tracking_link(dg_prod, job.id, channel.id)
-                if test_link_safe(dg_url):
-                    final_links.append(f"💎 Premium Solution: {dg_url}")
-        except Exception as e:
-            print(f"⚠️ Erro no Digistore Scout: {e}")
+        # Busca Digistore24 (Prioridade Europa/International)
+        if channel.language in ["fr-FR", "es-ES", "de-DE", "en-GB"]:
+            try:
+                from agents.monetization.digistore_scout import DigistoreScout
+                scout_dg = DigistoreScout(session)
+                dg_prod = scout_dg.find_and_cache_product(job.topic, channel.niche, channel.language, channel.tenant_id)
+                if dg_prod:
+                    dg_url = inject_tracking_link(dg_prod, job.id, channel.id)
+                    if test_link_safe(dg_url):
+                        final_links.append(f"💎 Premium Solution: {dg_url}")
+            except Exception as e:
+                print(f"⚠️ Erro no Digistore Scout: {e}")
 
-    # Busca Amazon
-    try:
-        from agents.monetization.amazon_scout import AmazonScout
-        scout_amz = AmazonScout(session)
-        amz_prod = scout_amz.find_and_cache_product(job.topic, channel.niche, channel.language, channel.tenant_id)
-        if amz_prod:
-            amz_url = inject_tracking_link(amz_prod, job.id, channel.id)
-            if test_link_safe(amz_url):
-                final_links.append(f"📚 Best Book/Hardware: {amz_url}")
-            else:
-                print(f"⚠️ Link Amazon inválido/404 descartado: {amz_url}")
-    except Exception as e:
-        print(f"⚠️ Erro no Amazon Scout: {e}")
+        # Busca Amazon
+        try:
+            from agents.monetization.amazon_scout import AmazonScout
+            scout_amz = AmazonScout(session)
+            amz_prod = scout_amz.find_and_cache_product(job.topic, channel.niche, channel.language, channel.tenant_id)
+            if amz_prod:
+                amz_url = inject_tracking_link(amz_prod, job.id, channel.id)
+                if test_link_safe(amz_url):
+                    final_links.append(f"📚 Best Book/Hardware: {amz_url}")
+                else:
+                    print(f"⚠️ Link Amazon inválido/404 descartado: {amz_url}")
+        except Exception as e:
+            print(f"⚠️ Erro no Amazon Scout: {e}")
 
     # 1.5 FALLBACKS DE SEGURANÇA (Links fornecidos pelo Usuário para garantir monetização)
     if not final_links:
@@ -378,7 +396,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
 
     affiliate_url = "\n".join(final_links)
     job.injected_affiliate_url = affiliate_url
-    if final_links:
+    if affiliate_url:
         print(f"💰 Monetization Injected:\n{affiliate_url}")
 
     # 2. IA: Busca contexto de vídeos virais anteriores (Loop de Aprendizado)
@@ -390,6 +408,29 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
             optimization_notes += "\n\n" + f.read()
     
     import json
+    
+    def heal_truncated_json(json_str: str) -> str:
+        json_str = json_str.strip()
+        try:
+            json.loads(json_str)
+            return json_str
+        except json.JSONDecodeError:
+            pass
+        
+        # Procuramos todas as posições de '}' de trás para frente
+        positions = [i for i, char in enumerate(json_str) if char == '}']
+        for pos in reversed(positions):
+            # Tentamos diferentes combinações de fechamento
+            for suffix in ["]}", "}", "]}", "\n]}}", "]\n}"]:
+                candidate = json_str[:pos+1] + suffix
+                try:
+                    json.loads(candidate)
+                    print(f"🛠️ [AUTO-HEAL] JSON truncado reparado com sucesso cortando na posição {pos} e adicionando '{suffix}'!")
+                    return candidate
+                except json.JSONDecodeError:
+                    continue
+        return json_str
+
     
     # Prevenção de alucinação de links
     link_instruction = ""
@@ -420,22 +461,32 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
         f"PROIBIDO citar 2024 ou 2025 como 'o futuro'. O ano atual é 2026."
     )
     
+    # FinOps: Adicionar reforço rígido de densidade no prompt inicial para que a LLM acerte de primeira
+    if not is_short:
+        prompt += (
+            f"\n\nCRITICAL DENSITY REQUIREMENT (FinOps Cost Saving): You MUST generate exactly {num_scenes} scenes. "
+            f"Each scene's narration MUST contain between 60 and 75 words of highly detailed, descriptive, non-generic business documentary narrative. "
+            f"Do not write short summaries or lazy descriptions. Target total word count: {num_scenes * 65} words (minimum 1500 words)."
+        )
+    
     # ───────────────────────────────────────────────────────
     # 3. LLM GENERATION LOOP (with density + validator)
     # ───────────────────────────────────────────────────────
     script_data = {}
-    for attempt in range(4):
+    MAX_ATTEMPTS = 2
+    for attempt in range(MAX_ATTEMPTS):
         raw_response = get_completion(
             prompt=prompt,
             system_instruction=system_prompt,
             json_mode=True,
-            max_tokens=6000
+            max_tokens=16000  # 36 cenas × ~300 tokens/cena + marketing_strategy overhead
         )
         
-        print(f"DEBUG (Attempt {attempt+1}): Resposta Raw da IA (primeiros 200 chars): {raw_response[:200]}...")
+        print(f"DEBUG (Attempt {attempt+1}/{MAX_ATTEMPTS}): Resposta Raw da IA (primeiros 200 chars): {raw_response[:200]}...")
         
         clean_json = orchestrator._clean_json(raw_response)
         try:
+            clean_json = heal_truncated_json(clean_json)
             script_data = json.loads(clean_json)
             # Normalização preliminar das cenas para contar palavras
             scenes = script_data.get("scenes", script_data.get("Cenas", []))
@@ -462,25 +513,34 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
 
             # Density gate
             if not is_short:
-                if word_count >= 1500:  # ~36 cenas × 42 palavras = 1512 palavras mínimo
-                    print(f"✅ Script validado: {word_count} palavras | Duplicatas: {len(validation_result.scenes_removed) if validation_result else 0} removidas")
+                # Se bater o threshold de 1500 ou se for a última tentativa e tiver mais de 1000 palavras, aceitamos para salvar custos
+                is_last_attempt = (attempt == MAX_ATTEMPTS - 1)
+                if word_count >= 1500:
+                    print(f"✅ Script perfeitamente validado com densidade máxima: {word_count} palavras | Duplicatas: {len(validation_result.scenes_removed) if validation_result else 0} removidas")
                     if validation_result and not validation_result.strong_hook:
-                        print("⚠️  HOOK FRACO detectado pelo Validator. Considere regenerar.")
+                        print("⚠️ HOOK FRACO detectado pelo Validator. Considere regenerar.")
+                    break
+                elif is_last_attempt and word_count >= 1000:
+                    print(f"⚠️ [FinOps] Script de {word_count} palavras aceito no limite de segurança de retentativas para evitar faturamento redundante da LLM.")
                     break
                 else:
-                    print(f"⚠️ Script muito curto ({word_count} palavras). Solicitando expansão (Tentativa {attempt+1}/4)...")
-                    prompt += (
-                        f"\n\nCRITICAL: Only {word_count} words generated. "
-                        f"You MUST write EXACTLY {num_scenes} scenes. "
-                        f"Each scene MUST have 60-75 words of narration. "
-                        f"Target: {num_scenes} scenes × 65 words = ~{num_scenes*65} words total."
-                    )
+                    if not is_last_attempt:
+                        print(f"⚠️ Script muito curto ({word_count} palavras). Solicitando expansão (Tentativa {attempt+1}/{MAX_ATTEMPTS})...")
+                        prompt += (
+                            f"\n\nCRITICAL: Only {word_count} words generated in previous attempt. "
+                            f"You MUST write EXACTLY {num_scenes} scenes. "
+                            f"Each scene MUST have 60-75 words of narration. "
+                            f"Target: {num_scenes} scenes × 65 words = ~{num_scenes*65} words total."
+                        )
             else:
                 break # Shorts não precisam de validação de densidade longa
         except Exception as e:
-            print(f"⚠️ Erro ao parsear JSON na tentativa {attempt+1}: {e}")
-            if attempt == 3:
-                print("⚠️ Todas as 4 tentativas falharam. Ativando recuperação emergencial via Regex...")
+            print(f"⚠️ Erro ao parsear JSON na tentativa {attempt+1}/{MAX_ATTEMPTS}: {e}")
+            if attempt == MAX_ATTEMPTS - 1:
+                print("⚠️ Todas as tentativas falharam. Ativando recuperação emergencial via Regex...")
+                # Não lança erro imediatamente, tenta cair na recuperação de Regex abaixo do bloco try-except geral
+                if "scenes" not in script_data and "scenes" not in clean_json:
+                    raise ValueError(f"Todas as {MAX_ATTEMPTS} tentativas de parse JSON falharam no copywriter: {e}")
     
     try:
         # Normalização de Chaves (Anti-Alucinação)

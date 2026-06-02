@@ -185,135 +185,162 @@ def run_voice_gen(text, output_path, voice=VOICE_DEFAULT):
         asyncio.run(generate_voice_audio(text, output_path, voice))
 
 def generate_voice_master(text, output_path, voice=VOICE_DEFAULT, language="en-US", job_data=None):
-    """Orquestrador de TTS: Usa clonagem local do Cid Moreira por padrão para todos os idiomas"""
-    
-    # Força a clonagem para TODOS os vídeos gerados na fábrica
-    use_cloning = True
-    
-    # O usuário pediu para usar o teste_cid_moreira.wav, mas usaremos a referência limpa original 
-    # se ela existir para garantir a emoção humana máxima (evitando cópia da cópia).
-    # Se ele mandou usar o teste_cid_moreira.wav especificamente, vamos tentar usar ele como fallback.
-    master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\cid_moreira_reference.wav"
-    if not os.path.exists(master_reference):
-        master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\teste_cid_moreira.wav"
-        
-    ref_audio = master_reference
-    ref_start = "00:00:00"
-    ref_duration = "10"
-    
-    if job_data and job_data.get("use_voice_cloning", False):
-        # Permite override se o job_data trouxer outro áudio específico
-        ref_audio = job_data.get("voice_reference_url", master_reference)
-        ref_start = job_data.get("voice_reference_start", "00:00:00")
-        ref_duration = job_data.get("voice_reference_duration", "10")
-        
-    # Se configurado para clonar e tem URL/Caminho
-    if use_cloning and ref_audio:
+    """Orquestrador de TTS: Respeita o TTS_ENGINE do .env, escolhendo o motor configurado."""
+    import re
+    # Remove qualquer marcador de pausa ou locução entre colchetes (ex: [PAUSA], [PAUSA_LONGA], [excited], etc.)
+    text = re.sub(r'\[.*?\]', ' ', text)
+    # Remove espaços em branco consecutivos/duplos criados pela remoção
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    engine = os.getenv("TTS_ENGINE", "edge").lower()
+    print(f"🎙️ [TTS] Iniciando síntese de áudio. Motor configurado: '{engine}'")
+
+    # ── 1. MOTOR ELEVENLABS (Pago, via API) ──
+    if engine == "elevenlabs":
         try:
-            from agents.video_editor.local_voice_cloner import download_reference_audio, generate_local_cloned_voice
-            import hashlib
+            print("👑 [ELEVENLABS] Gerando áudio via API ElevenLabs...")
+            from agents.video_editor.elevenlabs_tts import generate_audio_elevenlabs
+            voice_id = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJcg")
+            success = generate_audio_elevenlabs(text, output_path, voice_id=voice_id)
+            if success and os.path.exists(output_path):
+                print("✅ [ELEVENLABS] Áudio gerado com sucesso!")
+                return output_path
+            print("⚠️ [ELEVENLABS] Falha na geração. Caindo para Edge-TTS.")
+        except Exception as e:
+            print(f"❌ [ELEVENLABS] Erro: {e}. Caindo para Edge-TTS.")
+
+    # ── 2. MOTOR XTTS (Clonagem Local XTTSv2 - Cid Moreira) ──
+    elif engine == "xtts":
+        master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\cid_moreira_reference.wav"
+        if not os.path.exists(master_reference):
+            master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\teste_cid_moreira.wav"
             
-            # 1. Prepara o áudio de referência (Baixa do YouTube se necessário)
-            ref_id = hashlib.md5(f"{ref_audio}_{ref_start}_{ref_duration}".encode()).hexdigest()[:8]
-            ref_wav_path = os.path.join(ASSETS_CACHE, f"ref_{ref_id}.wav")
+        ref_audio = master_reference
+        ref_start = "00:00:00"
+        ref_duration = "10"
+        
+        if job_data and job_data.get("use_voice_cloning", False):
+            ref_audio = job_data.get("voice_reference_url", master_reference)
+            ref_start = job_data.get("voice_reference_start", "00:00:00")
+            ref_duration = job_data.get("voice_reference_duration", "10")
             
-            ref_ready = True
-            if not os.path.exists(ref_wav_path):
-                if ref_audio.startswith("http"):
-                    ref_ready = download_reference_audio(ref_audio, ref_wav_path, start_time=ref_start, duration=ref_duration)
-                elif os.path.exists(ref_audio):
-                    import shutil
-                    shutil.copy2(ref_audio, ref_wav_path)
-                    ref_ready = True
-                else:
-                    ref_ready = False
-                    
-            # 2. Se referência está pronta, gera clonagem local
-            if ref_ready:
-                import subprocess
-                venv_py = os.path.join("venv_clonagem", "Scripts", "python.exe")
-                script_path = os.path.join("agents", "video_editor", "local_voice_cloner.py")
+        if ref_audio:
+            try:
+                import torch
+                # Diagnóstico amigável de CUDA
+                if not torch.cuda.is_available():
+                    print("\n" + "!" * 80)
+                    print("⚠️  AVISO DE DESEMPENHO: O MOTOR XTTSv2 LOCAL ESTÁ RODANDO EM CPU!")
+                    print("   Sua máquina não possui GPU NVIDIA compatível com CUDA ativa.")
+                    print("   O processamento local na CPU levará quase 1 HORA por execução.")
+                    print("   Se deseja velocidade instantânea (5 segundos), mude no seu .env:")
+                    print("   -> Mude para: TTS_ENGINE=edge")
+                    print("!" * 80 + "\n")
+
+                from agents.video_editor.local_voice_cloner import download_reference_audio, generate_local_cloned_voice
+                import hashlib
                 
-                if os.path.exists(venv_py) and os.path.exists(script_path):
-                    print(f"🔄 [Bridge] Usando venv_clonagem legado para XTTSv2 no Python 3.11...")
-                    temp_txt_path = os.path.join(ASSETS_CACHE, f"temp_tts_text_{ref_id}.txt")
-                    try:
-                        with open(temp_txt_path, "w", encoding="utf-8") as temp_f:
-                            temp_f.write(text)
-                    except Exception as txt_err:
-                        print(f"⚠️ [Clonagem Bridge] Falha ao criar arquivo de texto temporário: {txt_err}")
-                        temp_txt_path = None
-                    
-                    if temp_txt_path and os.path.exists(temp_txt_path):
-                        cmd = [
-                            venv_py, script_path, 
-                            "--text_file", temp_txt_path, 
-                            "--lang", language, 
-                            "--ref", ref_wav_path, 
-                            "--out", output_path
-                        ]
+                ref_id = hashlib.md5(f"{ref_audio}_{ref_start}_{ref_duration}".encode()).hexdigest()[:8]
+                ref_wav_path = os.path.join(ASSETS_CACHE, f"ref_{ref_id}.wav")
+                
+                ref_ready = True
+                if not os.path.exists(ref_wav_path):
+                    if ref_audio.startswith("http"):
+                        ref_ready = download_reference_audio(ref_audio, ref_wav_path, start_time=ref_start, duration=ref_duration)
+                    elif os.path.exists(ref_audio):
+                        import shutil
+                        shutil.copy2(ref_audio, ref_wav_path)
+                        ref_ready = True
                     else:
-                        cmd = [
-                            venv_py, script_path, 
-                            "--text", text[:4000], # Fallback para tamanho reduzido para evitar falha do cmd
-                            "--lang", language, 
-                            "--ref", ref_wav_path, 
-                            "--out", output_path
-                        ]
+                        ref_ready = False
                         
-                    result = subprocess.run(cmd, stdout=None, stderr=None)
+                if ref_ready:
+                    import subprocess
+                    root_dir = os.path.dirname(os.path.abspath(__file__))
+                    venv_py = os.path.join(root_dir, "venv_clonagem", "Scripts", "python.exe")
+                    script_path = os.path.join(root_dir, "agents", "video_editor", "local_voice_cloner.py")
                     
-                    # Limpa o arquivo temporário
-                    if temp_txt_path and os.path.exists(temp_txt_path):
-                        try: os.remove(temp_txt_path)
-                        except: pass
+                    if not os.environ.get("DISABLE_XTTS") and os.path.exists(venv_py) and os.path.exists(script_path):
+                        print(f"🔄 [Bridge] Usando venv_clonagem legado para XTTSv2 no Python 3.11...")
+                        temp_txt_path = os.path.join(ASSETS_CACHE, f"temp_tts_text_{ref_id}.txt")
+                        try:
+                            with open(temp_txt_path, "w", encoding="utf-8") as temp_f:
+                                temp_f.write(text)
+                        except Exception as txt_err:
+                            print(f"⚠️ [Clonagem Bridge] Falha ao criar arquivo de texto temporário: {txt_err}")
+                            temp_txt_path = None
                         
-                    if result.returncode == 0 and os.path.exists(output_path):
-                        success = True
+                        if temp_txt_path and os.path.exists(temp_txt_path):
+                            cmd = [
+                                venv_py, script_path, 
+                                "--text_file", temp_txt_path, 
+                                "--lang", language, 
+                                "--ref", ref_wav_path, 
+                                "--out", output_path
+                            ]
+                        else:
+                            cmd = [
+                                venv_py, script_path, 
+                                "--text", text[:4000], 
+                                "--lang", language, 
+                                "--ref", ref_wav_path, 
+                                "--out", output_path
+                            ]
+                            
+                        clean_env = os.environ.copy()
+                        if "PYTHONPATH" in clean_env:
+                            del clean_env["PYTHONPATH"]
+                        result = subprocess.run(cmd, env=clean_env, stdout=None, stderr=None)
+                        
+                        if temp_txt_path and os.path.exists(temp_txt_path):
+                            try: os.remove(temp_txt_path)
+                            except: pass
+                            
+                        if result.returncode == 0 and os.path.exists(output_path):
+                            return output_path
+                        else:
+                            print(f"⚠️ [Clonagem Bridge] Erro do Subprocesso (código de retorno: {result.returncode}).")
                     else:
-                        print(f"⚠️ [Clonagem Bridge] Erro do Subprocesso (código de retorno: {result.returncode}). Verifique os logs acima.")
-                        success = False
-                else:
-                    success = generate_local_cloned_voice(text, language, ref_wav_path, output_path)
-                    
+                        success = generate_local_cloned_voice(text, language, ref_wav_path, output_path)
+                        if success:
+                            return output_path
+            except Exception as e:
+                print(f"⚠️ [Clonagem] Falha na clonagem local XTTSv2, voltando ao Edge-TTS: {e}")
+
+    # ── 3. MOTOR CHATTERBOX (Modelo dramático local - alternativo) ──
+    elif engine == "chatterbox":
+        try:
+            from agents.video_editor.chatterbox_tts import (
+                check_chatterbox_available, generate_chatterbox_audio,
+                select_voice_profile, print_install_instructions
+            )
+            if check_chatterbox_available():
+                voice_profile = select_voice_profile(job_data or {})
+                ref_audio_for_chatterbox = None
+                master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\cid_moreira_reference.wav"
+                if not os.path.exists(master_reference):
+                    master_reference = r"C:\Users\User\.gemini\antigravity\scratch\dark-channel-factory\teste_cid_moreira.wav"
+                if os.path.exists(master_reference):
+                    ref_audio_for_chatterbox = master_reference
+                
+                success = generate_chatterbox_audio(
+                    text=text,
+                    output_path=output_path,
+                    voice_profile=voice_profile,
+                    reference_audio=ref_audio_for_chatterbox,
+                    language=language,
+                )
                 if success:
                     return output_path
-        except Exception as e:
-            print(f"⚠️ [Clonagem] Falha na clonagem local XTTSv2, voltando ao Edge-TTS: {e}")
-            
-    # ── Fallback 2: CHATTERBOX TTS (Free, Cinematic, ElevenLabs-quality alternative) ──
-    try:
-        from agents.video_editor.chatterbox_tts import (
-            check_chatterbox_available, generate_chatterbox_audio,
-            select_voice_profile, print_install_instructions
-        )
-        if check_chatterbox_available():
-            voice_profile = select_voice_profile(job_data or {})
-            # Usa o mesmo arquivo de referência do XTTSv2 como voice cloning no Chatterbox
-            ref_audio_for_chatterbox = None
-            if os.path.exists(master_reference):
-                ref_audio_for_chatterbox = master_reference
-            
-            success = generate_chatterbox_audio(
-                text=text,
-                output_path=output_path,
-                voice_profile=voice_profile,
-                reference_audio=ref_audio_for_chatterbox,
-                language=language,
-            )
-            if success:
-                return output_path
+                print("⚠️ [CHATTERBOX] Falha na geração. Voltando ao Edge-TTS.")
             else:
-                print("\u26a0\ufe0f [CHATTERBOX] Falha na gera\u00e7\u00e3o. Voltando ao Edge-TTS.")
-        else:
-            print_install_instructions()
-            print("\u26a0\ufe0f [CHATTERBOX] N\u00e3o instalado. Usando Edge-TTS como fallback.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f [CHATTERBOX] Erro: {e}. Voltando ao Edge-TTS.")
+                print_install_instructions()
+        except Exception as e:
+            print(f"⚠️ [CHATTERBOX] Erro: {e}. Voltando ao Edge-TTS.")
 
-    # ── Fallback Final: Microsoft Edge-TTS (r\u00e1pido, gratuito, sempre dispon\u00edvel) ──
-    # Speed +10% garante ritmo din\u00e2mico, rate extra para n\u00edtidez em canais dark
-    print(f"\U0001f3a4 [EDGE-TTS] Fallback final: {voice}")
+    # ── 4. MOTOR PADRÃO (EDGE-TTS - Microsoft Neural Voices) ──
+    # Rápido, gratuito, vozes cinematográficas nativas com SSML supercharged
+    print(f"🎙️ [EDGE-TTS] Executando geração instantânea com a voz: {voice}")
     run_voice_gen(text, output_path, voice)
     return output_path
 
@@ -325,6 +352,76 @@ def get_resource_path(relative_path):
     return os.path.join(os.path.abspath("."), relative_path)
 
 ffmpeg_exe = _DEPS.get("ffmpeg_exe", "ffmpeg")
+
+_BEST_ENCODER_CACHE = None
+
+def detect_best_encoder():
+    """
+    Autodetecta o melhor codificador H.264 disponível no sistema.
+    Testa dinamicamente a presença de aceleração de hardware:
+    1. NVIDIA NVENC (h264_nvenc) - Máxima performance
+    2. Intel QSV (h264_qsv) - Excelente aceleração Intel
+    3. libx264 com preset ultrafast - Fallback de CPU ultra-rápido
+    """
+    global _BEST_ENCODER_CACHE
+    if _BEST_ENCODER_CACHE is not None:
+        return _BEST_ENCODER_CACHE
+
+    print("🔍 [HARDWARE DETECTION] Testando suporte a codificação por hardware no FFmpeg...")
+    import subprocess
+    import tempfile
+    
+    # 1. Testando NVIDIA NVENC
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_out = os.path.join(temp_dir, "test_nvenc.mp4")
+            test_cmd = [
+                ffmpeg_exe, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240",
+                "-t", "0.1", "-c:v", "h264_nvenc", test_out
+            ]
+            res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and os.path.exists(test_out):
+                print("🚀 [HARDWARE ACCEL] DETECTADO: Placa de vídeo NVIDIA com suporte a NVENC ativo!")
+                _BEST_ENCODER_CACHE = {
+                    "encoder": "h264_nvenc",
+                    "preset": "fast",
+                    "pix_fmt": "yuv420p",
+                    "args": []
+                }
+                return _BEST_ENCODER_CACHE
+    except Exception:
+        pass
+
+    # 2. Testando Intel QSV
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_out = os.path.join(temp_dir, "test_qsv.mp4")
+            test_cmd = [
+                ffmpeg_exe, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240",
+                "-t", "0.1", "-c:v", "h264_qsv", "-pix_fmt", "nv12", test_out
+            ]
+            res = subprocess.run(test_cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and os.path.exists(test_out):
+                print("⚡ [HARDWARE ACCEL] DETECTADO: Aceleração Intel QSV (Quick Sync Video) ativa!")
+                _BEST_ENCODER_CACHE = {
+                    "encoder": "h264_qsv",
+                    "preset": "medium",
+                    "pix_fmt": "nv12",
+                    "args": ["-b:v", "8M", "-maxrate:v", "12M", "-bufsize:v", "16M"]
+                }
+                return _BEST_ENCODER_CACHE
+    except Exception:
+        pass
+
+    # 3. Fallback de Software CPU (libx264) com preset otimizado
+    print("🐌 [HARDWARE ACCEL] Nenhuma aceleração de hardware ativa. Usando renderização por CPU com preset otimizado (ultrafast)...")
+    _BEST_ENCODER_CACHE = {
+        "encoder": "libx264",
+        "preset": "ultrafast",
+        "pix_fmt": "yuv420p",
+        "args": []
+    }
+    return _BEST_ENCODER_CACHE
 
 CLOUD_HUB_URL = os.getenv("CLOUD_HUB_URL", "https://dark-channel-factory.vercel.app")
 WORKER_REGION = "North America"
@@ -345,6 +442,8 @@ os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
 
 def fetch_background_music(mood):
     """Busca trilha sonora no Pixabay ou Jamendo baseada no mood do roteiro."""
+    if mood in ["suspense", "horror"]:
+        mood = "scary dark horror suspense cinematic tension impact"
     local_path = os.path.join(AUDIO_CACHE_DIR, f"music_{mood}.mp3")
     if os.path.exists(local_path): return local_path
     
@@ -393,23 +492,440 @@ def fetch_sfx(cue):
     except: pass
     return None
 
-def fetch_wiki_image(entity_name):
-    """Busca imagens reais e públicas na Wikipedia para entidades específicas (Marcas, Pessoas, Prédios)."""
+def fetch_public_internet_video(query):
+    """Busca vídeos públicos e livres (Creative Commons) no Wikimedia Commons para termos e pessoas famosas."""
+    headers = {
+        "User-Agent": "DarkChannelFactoryBot/1.0 (contact@canaldarkdjm.com) Python-Requests/2.0"
+    }
+    import urllib.parse
+    import requests
+    
+    print(f"🎬 [INTERNET VIDEO] Buscando vídeo público livre na internet para: '{query}'...")
+    # Wikimedia Commons API com gerador de busca filtrando por tipo de arquivo de vídeo
+    url_commons = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(query + ' filetype:video')}&gsrnamespace=6&prop=imageinfo&iiprop=url&format=json"
+    
     try:
-        import requests
-        import urllib.parse
-        print(f"🏛️ [WIKI] Buscando imagem real para: {entity_name}...")
-        search_url = f"https://en.wikipedia.org/w/api.php?action=query&titles={urllib.parse.quote(entity_name)}&prop=pageimages&format=json&pithumbsize=1280"
-        r = requests.get(search_url, timeout=10)
+        r = requests.get(url_commons, headers=headers, timeout=12)
         if r.status_code == 200:
             data = r.json()
             pages = data.get("query", {}).get("pages", {})
             for page_id in pages:
-                thumb = pages[page_id].get("thumbnail", {}).get("source")
-                if thumb: return thumb
+                info = pages[page_id].get("imageinfo", [])
+                if info:
+                    direct_url = info[0].get("url")
+                    if direct_url:
+                        # Confere se a URL possui extensão de vídeo suportada
+                        lower_url = direct_url.lower()
+                        if any(ext in lower_url for ext in [".mp4", ".webm", ".ogv", ".mov"]):
+                            print(f"   ✅ [INTERNET VIDEO] Vídeo público encontrado! URL: {direct_url}")
+                            return direct_url
     except Exception as e:
-        print(f"⚠️ [WIKI] Erro: {e}")
+        print(f"   ⚠️ [INTERNET VIDEO] Falha na busca do Commons: {e}")
+        
+    # Fallback 2: Busca sem filtro de tipo rígido, mas validando a extensão da URL de mídia
+    url_commons_fallback = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(query)}&gsrnamespace=6&prop=imageinfo&iiprop=url&format=json"
+    try:
+        r = requests.get(url_commons_fallback, headers=headers, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            pages = data.get("query", {}).get("pages", {})
+            for page_id in pages:
+                info = pages[page_id].get("imageinfo", [])
+                if info:
+                    direct_url = info[0].get("url")
+                    if direct_url:
+                        lower_url = direct_url.lower()
+                        if any(ext in lower_url for ext in [".webm", ".ogv", ".mp4", ".mov"]):
+                            print(f"   ✅ [INTERNET VIDEO FALLBACK] Vídeo público encontrado! URL: {direct_url}")
+                            return direct_url
+    except Exception as e:
+        pass
+        
     return None
+
+def fetch_wiki_image(entity_name):
+    """Busca imagens reais e públicas na Wikipedia/Commons para entidades específicas (Marcas, Pessoas, F1)."""
+    headers = {
+        "User-Agent": "DarkChannelFactoryBot/1.0 (contact@canaldarkdjm.com) Python-Requests/2.0"
+    }
+    import requests
+    import urllib.parse
+    print(f"🏛️ [WIKI] Buscando imagem real para: {entity_name}...")
+    
+    # 1. Busca Direta com Title Case e redirects
+    entity_title = entity_name.title()
+    entity_title = entity_title.replace("F1", "F1").replace("Gp", "GP")
+    
+    url_direct = f"https://en.wikipedia.org/w/api.php?action=query&titles={urllib.parse.quote(entity_title)}&prop=pageimages&format=json&pithumbsize=1280&redirects=1"
+    try:
+        r = requests.get(url_direct, headers=headers, timeout=5)
+        if r.status_code == 200:
+            pages = r.json().get("query", {}).get("pages", {})
+            for page_id in pages:
+                if page_id != "-1":
+                    thumb = pages[page_id].get("thumbnail", {}).get("source")
+                    if thumb:
+                        print(f"✅ [WIKI DIRECT] Encontrada imagem direta para {entity_title}: {thumb}")
+                        return thumb
+    except Exception as e:
+        pass
+        
+    # 2. Busca de texto (Search API) para achar o artigo mais relevante e obter a pageimage dele
+    url_search = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(entity_name)}&utf8=&format=json"
+    try:
+        r = requests.get(url_search, headers=headers, timeout=5)
+        if r.status_code == 200:
+            search_results = r.json().get("query", {}).get("search", [])
+            if search_results:
+                best_title = search_results[0].get("title")
+                url_img = f"https://en.wikipedia.org/w/api.php?action=query&titles={urllib.parse.quote(best_title)}&prop=pageimages&format=json&pithumbsize=1280&redirects=1"
+                r2 = requests.get(url_img, headers=headers, timeout=5)
+                if r2.status_code == 200:
+                    pages = r2.json().get("query", {}).get("pages", {})
+                    for page_id in pages:
+                        thumb = pages[page_id].get("thumbnail", {}).get("source")
+                        if thumb:
+                            print(f"✅ [WIKI SEARCH] Encontrada imagem para '{best_title}': {thumb}")
+                            return thumb
+    except Exception as e:
+        pass
+        
+    # 3. Fallback Final: Busca direta na WIKIMEDIA COMMONS
+    url_commons = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(entity_name)}&gsrnamespace=6&prop=imageinfo&iiprop=url&iiurlwidth=1280&format=json"
+    try:
+        r = requests.get(url_commons, headers=headers, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            pages = data.get("query", {}).get("pages", {})
+            for page_id in pages:
+                info = pages[page_id].get("imageinfo", [])
+                if info:
+                    thumb_url = info[0].get("thumburl")
+                    if thumb_url:
+                        print(f"✅ [WIKI COMMONS THUMB] Encontrada imagem no Commons: {thumb_url}")
+                        return thumb_url
+                    direct_url = info[0].get("url")
+                    if direct_url:
+                        print(f"✅ [WIKI COMMONS DIRECT] Encontrada imagem no Commons: {direct_url}")
+                        return direct_url
+    except Exception as e:
+        print(f"⚠️ [WIKI COMMONS] Erro na busca do Commons: {e}")
+        
+    return None
+
+def generate_pollinations_image(prompt, output_path):
+    """Gera uma ilustração cyberpunk de altíssima qualidade via Pollinations.ai (gratuito e sem cota)."""
+    import urllib.parse
+    import requests
+    import random
+    
+    print(f"🎨 [POLLINATIONS] Gerando imagem artística de IA para prompt: '{prompt}'...")
+    try:
+        # Enriquecer o prompt com estilo cyberpunk/cinematic de elite para Wow factor
+        enriched_prompt = f"cinematic dark theme style illustration of {prompt}, technical details, neon cyan and purple accents, high contrast, clean vector render, 8k resolution, trending on artstation"
+        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enriched_prompt)}?width=1280&height=720&nologo=true&seed={random.randint(1, 999999)}"
+        
+        r = requests.get(url, timeout=25)
+        if r.status_code == 200 and len(r.content) > 15000:
+            with open(output_path, "wb") as f:
+                f.write(r.content)
+            print(f"   ✅ [POLLINATIONS] Imagem gerada com sucesso! Tamanho: {len(r.content)/1024:.1f}KB")
+            return True
+    except Exception as e:
+        print(f"   ⚠️ [POLLINATIONS] Falha ao gerar imagem: {e}")
+    return False
+
+def generate_code_image(output_path, code_idx=0, is_short=False):
+    from PIL import Image, ImageDraw, ImageFont
+    import os
+    w, h = (720, 1280) if is_short else (1280, 720)
+    img = Image.new("RGBA", (w, h), color=(10, 8, 19, 255))
+    draw = ImageDraw.Draw(img)
+    
+    # Grade sutil
+    grid_color = (25, 20, 45, 50)
+    grid_size = 40
+    for x in range(0, w, grid_size):
+        draw.line([(x, 0), (x, h)], fill=grid_color, width=1)
+    for y in range(0, h, grid_size):
+        draw.line([(0, y), (w, y)], fill=grid_color, width=1)
+        
+    # Barra superior editor
+    bar_h = 40
+    draw.rectangle([(0, 0), (w, bar_h)], fill=(16, 12, 28, 255))
+    draw.ellipse([(15, 13), (27, 25)], fill=(255, 95, 87, 255))
+    draw.ellipse([(35, 13), (47, 25)], fill=(254, 188, 46, 255))
+    draw.ellipse([(55, 13), (67, 25)], fill=(40, 200, 64, 255))
+    
+    titles = [
+        "f1_telemetry_pipeline.py",
+        "pneu_degradation_predictor.py",
+        "pitstop_strategy_optimization.py",
+        "overtake_probability_montecarlo.py"
+    ]
+    code_variants = [
+        [
+            "import fastf1",
+            "import pandas as pd",
+            "from sklearn.ensemble import RandomForestClassifier",
+            "",
+            "# 1. Initialize F1 telemetry API",
+            "session = fastf1.get_session(2026, 'Monaco', 'Q')",
+            "session.load()",
+            "",
+            "# 2. Feature Engineering: Speed Delta",
+            "telemetry = session.laps.pick_fastest().get_telemetry()",
+            "telemetry['accel'] = telemetry['Speed'].diff()",
+            "",
+            "# 3. Predict Acceleration using RandomForest",
+            "model = RandomForestClassifier(n_estimators=100)",
+            "X = telemetry[['Speed', 'Throttle', 'Brake']]",
+            "y = telemetry['accel'] > 0",
+            "model.fit(X, y)",
+            "",
+            "print('F1 Telemetry Integration: SUCCESS')"
+        ],
+        [
+            "import numpy as np",
+            "import tensorflow as tf",
+            "from keras.models import Sequential",
+            "",
+            "# 1. Load tyre compound degradation data",
+            "tyres = ['Soft', 'Medium', 'Hard']",
+            "track_temp = 42.5 # Celsius degree",
+            "",
+            "# 2. Multi-layer Neural Network degradation prediction",
+            "model = Sequential([",
+            "    tf.keras.layers.Dense(64, activation='relu', input_shape=(4,)),",
+            "    tf.keras.layers.Dense(32, activation='relu'),",
+            "    tf.keras.layers.Dense(3, activation='softmax')",
+            "])",
+            "model.compile(optimizer='adam', loss='categorical_crossentropy')",
+            "",
+            "# 3. Predict degradation probability",
+            "state = np.array([[track_temp, 12, 1.18, 0.95]]) # lap, G-force, wear",
+            "degrad_prob = model.predict(state)",
+            "print(f'Tyre wear probability (S, M, H): {degrad_prob}')"
+        ],
+        [
+            "import scipy.optimize as opt",
+            "import numpy as np",
+            "",
+            "# 1. Pitstop strategy dynamic programming solver",
+            "def pitstop_cost_function(x, lap_time_loss, wear_rate):",
+            "    laps_on_tyre = x[0]",
+            "    wear_penalty = wear_rate * (laps_on_tyre ** 1.8)",
+            "    return lap_time_loss + wear_penalty",
+            "",
+            "# 2. Linear constraints & bounds for 2026 Season",
+            "bounds = [(10, 35)] # Minimum 10, maximum 35 laps per stint",
+            "initial_guess = [20]",
+            "",
+            "# 3. Run SLSQP optimization",
+            "result = opt.minimize(pitstop_cost_function, initial_guess,",
+            "                      args=(23.5, 0.085), bounds=bounds)",
+            "",
+            "best_lap_to_pit = int(np.round(result.x[0]))",
+            "print(f'Optimal lap for strategy pitstop: {best_lap_to_pit}')"
+        ],
+        [
+            "import random",
+            "",
+            "# 1. Monte Carlo overtake simulation based on DRS and slipstream",
+            "def simulate_overtake(drs_active, slipstream_coeff, gap_ms):",
+            "    success_count = 0",
+            "    simulations = 5000",
+            "    ",
+            "    for _ in range(simulations):",
+            "        random_factor = random.normalvariate(0, 1.0)",
+            "        overtake_index = (slipstream_coeff * 2.5) + (1.8 if drs_active else 0.0) - (gap_ms / 150.0) + random_factor",
+            "        if overtake_index > 3.0:",
+            "            success_count += 1",
+            "            ",
+            "    return success_count / simulations",
+            "",
+            "# 2. Overtaking probability at Silverstone Sector 3",
+            "prob = simulate_overtake(drs_active=True, slipstream_coeff=1.2, gap_ms=180.0)",
+            "print(f'Monte Carlo overtake success probability: {prob * 100:.2f}%')"
+        ]
+    ]
+    
+    title = titles[code_idx % len(titles)]
+    code_lines = code_variants[code_idx % len(code_variants)]
+    
+    font_title = None
+    for path in ["C:\\Windows\\Fonts\\consolab.ttf", "C:\\Windows\\Fonts\\consola.ttf", "arial.ttf"]:
+        if os.path.exists(path):
+            try:
+                font_title = ImageFont.truetype(path, 14)
+                break
+            except: pass
+    if not font_title:
+        font_title = ImageFont.load_default()
+        
+    draw.text((85, 11), title, fill=(150, 140, 180, 255), font=font_title)
+    
+    font_code = None
+    for path in ["C:\\Windows\\Fonts\\consolab.ttf", "C:\\Windows\\Fonts\\consola.ttf", "arial.ttf"]:
+        if os.path.exists(path):
+            try:
+                font_code = ImageFont.truetype(path, 20 if not is_short else 15)
+                break
+            except: pass
+    if not font_code:
+        font_code = ImageFont.load_default()
+        
+    colors = {
+        "keyword": (255, 121, 198, 255),  # Rosa
+        "comment": (98, 114, 164, 255),  # Roxo acinzentado
+        "string": (241, 250, 140, 255),   # Amarelo
+        "import": (139, 233, 253, 255),   # Ciano
+        "default": (248, 248, 242, 255),  # Branco
+        "number": (189, 147, 249, 255)   # Roxo
+    }
+    
+    start_y = 60
+    for idx, line in enumerate(code_lines):
+        line_y = start_y + idx * (28 if not is_short else 22)
+        words = line.split(" ")
+        draw_x = 30
+        
+        if line.strip().startswith("#"):
+            draw.text((draw_x, line_y), line, fill=colors["comment"], font=font_code)
+            continue
+            
+        for word in words:
+            if not word:
+                draw_x += 10
+                continue
+                
+            clean_word = word.replace("(", "").replace(")", "").replace("[", "").replace("]", "").replace("'", "").replace('"', '').replace(",", "")
+            
+            w_color = colors["default"]
+            if clean_word in ["import", "from", "as", "class", "def", "return", "if", "for", "in", "and", "or", "not"]:
+                w_color = colors["keyword"]
+            elif clean_word.isdigit():
+                w_color = colors["number"]
+            elif "'" in word or '"' in word:
+                w_color = colors["string"]
+            elif clean_word in ["fastf1", "pd", "RandomForestClassifier", "print", "telemetry", "model", "session", "X", "y", "np", "tf", "Sequential", "opt", "random"]:
+                w_color = colors["import"]
+                
+            draw.text((draw_x, line_y), word + " ", fill=w_color, font=font_code)
+            try:
+                word_w = draw.textlength(word + " ", font=font_code)
+            except AttributeError:
+                word_w = len(word + " ") * (12 if not is_short else 9)
+            draw_x += word_w
+            
+    img.save(output_path, "PNG")
+    print(f"✅ [PIL] Code image generated programmatically: {output_path}")
+
+def generate_flowchart_image(output_path, flow_idx=0, is_short=False):
+    from PIL import Image, ImageDraw, ImageFont
+    import os
+    w, h = (720, 1280) if is_short else (1280, 720)
+    img = Image.new("RGBA", (w, h), color=(10, 8, 19, 255))
+    draw = ImageDraw.Draw(img)
+    
+    # Grade de fundo
+    grid_color = (25, 20, 45, 50)
+    grid_size = 40
+    for x in range(0, w, grid_size):
+        draw.line([(x, 0), (x, h)], fill=grid_color, width=1)
+    for y in range(0, h, grid_size):
+        draw.line([(0, y), (w, y)], fill=grid_color, width=1)
+        
+    # Barra superior
+    bar_h = 40
+    draw.rectangle([(0, 0), (w, bar_h)], fill=(16, 12, 28, 255))
+    draw.ellipse([(15, 13), (27, 25)], fill=(255, 95, 87, 255))
+    draw.ellipse([(35, 13), (47, 25)], fill=(254, 188, 46, 255))
+    draw.ellipse([(55, 13), (67, 25)], fill=(40, 200, 64, 255))
+    
+    flow_titles = [
+        "f1_realtime_flowchart.drawio",
+        "pitstop_optimization_flowchart.drawio",
+        "betting_arbitrage_flowchart.drawio"
+    ]
+    flow_variants = [
+        [
+            {"title": "F1 LIVE TELEMETRY API", "desc": "Ingests real-time speed & RPM", "color": (139, 92, 246, 255)},
+            {"title": "DATA PREPROCESSING ENGINE", "desc": "Pre-processes telemetry delta", "color": (59, 130, 246, 255)},
+            {"title": "AI PREDICTIVE MODEL", "desc": "Predicts live lap acceleration", "color": (236, 72, 153, 255)},
+            {"title": "AUTOMATED TRIGGER QUEUE", "desc": "Triggers execution events", "color": (16, 185, 129, 255)}
+        ],
+        [
+            {"title": "TRACK CONDITIONS MONITOR", "desc": "Real-time wet/dry track friction", "color": (59, 130, 246, 255)},
+            {"title": "TYRE DEGRADATION MODEL", "desc": "Calculates compound soft/hard friction", "color": (236, 72, 153, 255)},
+            {"title": "SLSQP DYNAMIC SOLVER", "desc": "Finds the mathematical optimal box lap", "color": (139, 92, 246, 255)},
+            {"title": "PITSTOP EXECUTION DECISION", "desc": "Pushes stint update to garage", "color": (16, 185, 129, 255)}
+        ],
+        [
+            {"title": "F1 ODDS SCRAPING ENGINE", "desc": "Scrapes dynamic betting bookmakers", "color": (139, 92, 246, 255)},
+            {"title": "BETTING ARBITRAGE ALGORITHM", "desc": "Locates positive EV arbitrage bets", "color": (59, 130, 246, 255)},
+            {"title": "NEURAL RISK ASSESSMENT", "desc": "Minimizes standard capital exposure", "color": (236, 72, 153, 255)},
+            {"title": "AUTO BANKING TRANS", "desc": "Locks arbitrage returns instantly", "color": (16, 185, 129, 255)}
+        ]
+    ]
+    
+    title = flow_titles[flow_idx % len(flow_titles)]
+    steps = flow_variants[flow_idx % len(flow_variants)]
+    
+    font_title = None
+    for path in ["C:\\Windows\\Fonts\\consolab.ttf", "arial.ttf"]:
+        if os.path.exists(path):
+            try:
+                font_title = ImageFont.truetype(path, 14)
+                break
+            except: pass
+    if not font_title:
+        font_title = ImageFont.load_default()
+        
+    draw.text((85, 11), title, fill=(150, 140, 180, 255), font=font_title)
+    
+    font_step_title = None
+    font_step_desc = None
+    for path in ["C:\\Windows\\Fonts\\consolab.ttf", "arial.ttf"]:
+        if os.path.exists(path):
+            try:
+                font_step_title = ImageFont.truetype(path, 18 if not is_short else 14)
+                font_step_desc = ImageFont.truetype(path, 13 if not is_short else 10)
+                break
+            except: pass
+    if not font_step_title:
+        font_step_title = ImageFont.load_default()
+        font_step_desc = ImageFont.load_default()
+        
+    box_w = 380 if not is_short else 280
+    box_h = 80 if not is_short else 65
+    
+    start_y = 80
+    gap = 75 if not is_short else 130
+    
+    for idx, step in enumerate(steps):
+        box_x = (w - box_w) // 2
+        box_y = start_y + idx * (box_h + gap)
+        
+        draw.rectangle([(box_x, box_y), (box_x + box_w, box_y + box_h)], fill=(20, 16, 36, 220), outline=step["color"], width=3)
+        draw.rectangle([(box_x - 1, box_y - 1), (box_x + box_w + 1, box_y + box_h + 1)], fill=None, outline=(*step["color"][:3], 100), width=1)
+        
+        draw.text((box_x + 15, box_y + 15), step["title"], fill=(255, 255, 255, 255), font=font_step_title)
+        draw.text((box_x + 15, box_y + (45 if not is_short else 38)), step["desc"], fill=(180, 180, 210, 255), font=font_step_desc)
+        
+        if idx < len(steps) - 1:
+            arrow_x = w // 2
+            arrow_y_start = box_y + box_h
+            arrow_y_end = arrow_y_start + gap
+            draw.line([(arrow_x, arrow_y_start), (arrow_x, arrow_y_end)], fill=(120, 110, 150, 255), width=3)
+            draw.polygon([
+                (arrow_x - 8, arrow_y_end - 12),
+                (arrow_x + 8, arrow_y_end - 12),
+                (arrow_x, arrow_y_end)
+            ], fill=(120, 110, 150, 255))
+            
+    img.save(output_path, "PNG")
+    print(f"✅ [PIL] Flowchart generated programmatically: {output_path}")
 
 def fetch_brand_logo(brand_name):
     """Busca o logo oficial de uma marca via Clearbit API (Gratuito)."""
@@ -434,8 +950,30 @@ def fetch_brand_logo(brand_name):
 def fetch_premium_broll(keyword, used_files=None):
     if used_files is None: used_files = set()
     import re
+    import hashlib
     # 0. Limpeza e Extração de Palavras-Chave (Stop words expandidas)
     clean_keyword = re.sub(r'[^\w\s]', '', keyword.lower())
+    
+    # [NOVO] GERADOR PROGRAMÁTICO DE CÓDIGOS E FLUXOGRAMAS (PILLOW)
+    tech_code_terms = ["code", "python", "script", "algorithm", "source code", "código", "program", "programação"]
+    tech_flow_terms = ["flowchart", "diagram", "architecture", "diagrama", "fluxograma", "structure", "pipeline", "database", "telemetry"]
+    
+    is_code = any(term in clean_keyword for term in tech_code_terms)
+    is_flow = any(term in clean_keyword for term in tech_flow_terms)
+    
+    if is_code or is_flow:
+        safe_id = hashlib.md5(clean_keyword.encode()).hexdigest()[:12]
+        img_name = f"tech_code_{safe_id}.png" if is_code else f"tech_flow_{safe_id}.png"
+        local_path = os.path.join(ASSETS_CACHE, img_name)
+        if not os.path.exists(local_path):
+            is_short_img = "vertical" in clean_keyword or "short" in clean_keyword
+            val_idx = int(safe_id, 16)
+            if is_code:
+                generate_code_image(local_path, code_idx=val_idx, is_short=is_short_img)
+            else:
+                generate_flowchart_image(local_path, flow_idx=val_idx, is_short=is_short_img)
+        return local_path
+
     words = clean_keyword.split()
     
     # Palavras que não agregam valor à busca de imagem/vídeo
@@ -454,17 +992,55 @@ def fetch_premium_broll(keyword, used_files=None):
     best_match = None
     best_score = 0
     
-    # [NOVO] DETECÇÃO DE ENTIDADES (Marcas, Empresas e Bilionários)
+    # [NOVO] DETECÇÃO DE ENTIDADES (Marcas, Empresas, F1 e Bilionários)
     # Se a keyword contém uma entidade famosa, tentamos buscar a imagem real primeiro!
     entities_to_watch = [
+        "wall street", "white house", "stock market", "new york stock exchange", "pentagon", "nasa", "united nations",
+        "scuderia ferrari", "red bull racing", "mercedes amg f1", "aston martin f1",
+        "lewis hamilton", "max verstappen", "charles leclerc", "lando norris", "george russell",
+        "oscar piastri", "carlos sainz", "fernando alonso", "sergio perez",
+        "formula 1", "formula one", "grand prix", "silverstone", "monaco", "interlagos",
         "blackrock", "jpmorgan", "goldman sachs", "nvidia", "tesla", "apple", "google", "microsoft", "amazon", "chase",
         "elon musk", "jeff bezos", "bill gates", "mark zuckerberg", "warren buffett", "bernard arnault", "larry page", 
-        "sergey brin", "larry ellison", "steve jobs", "sam altman", "jensen huang", "vitalik buterin"
+        "sergey brin", "larry ellison", "steve jobs", "sam altman", "jensen huang", "vitalik buterin", "f1", "ferrari", "red bull",
+        "donald trump", "joe biden", "barack obama", "vladimir putin", "taylor swift", "mrbeast"
     ]
     detected_entity = next((e for e in entities_to_watch if e in clean_keyword), None)
     
     if detected_entity:
         print(f"🎯 [ENTITY] Entidade detectada: {detected_entity.upper()}. Buscando ativos reais...")
+        
+        # Prioridade 0: Vídeos Públicos da Internet (Wikimedia Commons)
+        public_video_url = fetch_public_internet_video(detected_entity)
+        if public_video_url:
+            print(f"✅ [ENTITY] Vídeo público de internet encontrado: {public_video_url}")
+            safe_id = hashlib.md5(public_video_url.encode()).hexdigest()[:12]
+            
+            # Detecta a extensão do vídeo original
+            asset_ext = ".mp4"
+            lower_url = public_video_url.lower()
+            if ".webm" in lower_url: asset_ext = ".webm"
+            elif ".ogv" in lower_url: asset_ext = ".ogv"
+            elif ".mov" in lower_url: asset_ext = ".mov"
+            
+            local_path = os.path.join(ASSETS_CACHE, f"entity_vid_{safe_id}{asset_ext}")
+            if not os.path.exists(local_path):
+                try:
+                    download_headers = {
+                        "User-Agent": "DarkChannelFactoryBot/1.0 (contact@canaldarkdjm.com) Python-Requests/2.0"
+                    }
+                    r = requests.get(public_video_url, headers=download_headers, timeout=45)
+                    r.raise_for_status()
+                    with open(local_path, "wb") as f: f.write(r.content)
+                    return local_path
+                except Exception as e:
+                    print(f"⚠️ [ENTITY] Falha ao baixar vídeo público {public_video_url}: {e}")
+                    if os.path.exists(local_path):
+                        try: os.remove(local_path)
+                        except: pass
+            else:
+                return local_path
+                
         # Prioridade 1: Wikipedia (Fotos Reais de Pessoas ou Sedes)
         entity_url = fetch_wiki_image(detected_entity)
         if entity_url:
@@ -473,12 +1049,18 @@ def fetch_premium_broll(keyword, used_files=None):
             local_path = os.path.join(ASSETS_CACHE, f"entity_{safe_id}.jpg")
             if not os.path.exists(local_path):
                 try:
-                    r = requests.get(entity_url, timeout=15)
+                    download_headers = {
+                        "User-Agent": "DarkChannelFactoryBot/1.0 (contact@canaldarkdjm.com) Python-Requests/2.0"
+                    }
+                    r = requests.get(entity_url, headers=download_headers, timeout=15)
                     r.raise_for_status()
                     with open(local_path, "wb") as f: f.write(r.content)
                     return local_path
                 except Exception as e:
                     print(f"⚠️ [ENTITY] Falha ao baixar imagem Wiki {entity_url}: {e}")
+                    if os.path.exists(local_path):
+                        try: os.remove(local_path)
+                        except: pass
             else:
                 return local_path
         # Prioridade 2: Logo (Apenas para Marcas, se Wiki falhar)
@@ -489,12 +1071,18 @@ def fetch_premium_broll(keyword, used_files=None):
             local_path = os.path.join(ASSETS_CACHE, f"logo_{safe_id}.png")
             if not os.path.exists(local_path):
                 try:
-                    r = requests.get(logo_url, timeout=15)
+                    download_headers = {
+                        "User-Agent": "DarkChannelFactoryBot/1.0 (contact@canaldarkdjm.com) Python-Requests/2.0"
+                    }
+                    r = requests.get(logo_url, headers=download_headers, timeout=15)
                     r.raise_for_status()
                     with open(local_path, "wb") as f: f.write(r.content)
                     return local_path
                 except Exception as e:
                     print(f"⚠️ [ENTITY] Falha ao baixar logo de {logo_url}: {e}")
+                    if os.path.exists(local_path):
+                        try: os.remove(local_path)
+                        except: pass
             else:
                 return local_path
     
@@ -519,21 +1107,27 @@ def fetch_premium_broll(keyword, used_files=None):
     # Simplificar keyword para as APIs web (mais palavras para ser preciso, mas filtradas)
     base_query = " ".join(important_words[:7]) if important_words else "artificial intelligence technology"
     api_query = f"{base_query} bright 4k modern"
-
-    # BUG FIX: Usar o path absoluto para checar no used_files antes de retornar do cache de assets
-    # Também adicionamos um 'index' opcional ou variação no hash se necessário
+    
     safe_id = hashlib.md5(api_query.encode()).hexdigest()[:12]
+    
+    # [FIX] Verifica se já existe o arquivo exato no cache com qualquer das extensões válidas (.mp4, .jpg, .png, .jpeg)
+    for ext_candidate in [".mp4", ".jpg", ".png", ".jpeg"]:
+        local_path_candidate = os.path.join(ASSETS_CACHE, f"asset_{safe_id}{ext_candidate}")
+        if os.path.exists(local_path_candidate) and local_path_candidate not in used_files:
+            used_files.add(local_path_candidate)
+            return local_path_candidate
+            
+    # Variável padrão local_path
     local_path = os.path.join(ASSETS_CACHE, f"asset_{safe_id}.mp4")
     
-    if os.path.exists(local_path) and local_path not in used_files:
-        used_files.add(local_path)
-        return local_path
-
     # 1.1 NOVO: Busca Semântica no Cache Local (Se o arquivo exato não existe, procura por similaridade)
     # Isso evita chamadas desnecessárias à API e resolve o problema de 'Black Screen' se a internet falhar
     import glob
     print(f"🔍 [CACHE] Procurando similaridade local para: '{api_query}'...")
-    all_cached = glob.glob(os.path.join(ASSETS_CACHE, "*.mp4"))
+    all_cached = []
+    for ext_glob in ["*.mp4", "*.jpg", "*.png", "*.jpeg"]:
+        all_cached.extend(glob.glob(os.path.join(ASSETS_CACHE, ext_glob)))
+        
     best_cache_match = None
     max_hits = 0
     for cached_file in all_cached[:500]: # Limita a 500 arquivos para performance
@@ -655,70 +1249,146 @@ def fetch_premium_broll(keyword, used_files=None):
         if asset_url: source_name = "Fallback Filtrado/Segurança"
 
     if asset_url:
+        # [FIX] Determina a extensão correta baseada no tipo real de arquivo
+        asset_ext = ".mp4"
+        lower_url = asset_url.lower()
+        if any(e in lower_url for e in [".jpg", ".jpeg", ".webp"]):
+            asset_ext = ".jpg"
+        elif ".png" in lower_url:
+            asset_ext = ".png"
+            
+        local_path = os.path.join(ASSETS_CACHE, f"asset_{safe_id}{asset_ext}")
+        
         try:
-            print(f"✅ [B-ROLL] Fonte: {source_name} | Baixando...")
+            print(f"✅ [B-ROLL] Fonte: {source_name} | Baixando ({asset_ext})...")
             # Pexels pode ser lento. Aumentando o timeout para 60s.
             r = requests.get(asset_url, stream=True, headers=headers, timeout=60)
             if r.status_code == 200:
                 with open(local_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=1024*1024):
                         if chunk: f.write(chunk)
-                used_files.add(local_path)
-                return local_path
+                
+                # Validação pós-download: arquivos menores que 10KB são certamente HTML de erro ou vazios
+                if os.path.exists(local_path):
+                    file_size = os.path.getsize(local_path)
+                    if file_size < 10240:
+                        print(f"⚠️ [B-ROLL WARNING] Arquivo baixado muito pequeno ({file_size} bytes). Provavelmente corrompido ou erro do servidor. Removendo do cache...")
+                        try: os.remove(local_path)
+                        except: pass
+                    else:
+                        used_files.add(local_path)
+                        return local_path
         except Exception as e: 
             print(f"❌ [B-ROLL ERRO] Falha ao baixar: {e}")
+            if os.path.exists(local_path):
+                try: os.remove(local_path)
+                except: pass
     
-    # 4. FALLBACK FINAL: Gerador de Quadro de Contexto "Elite" (Pillow com Gradiente)
+    # 3.9 FALLBACK PREMIUM POR IA: Pollinations.ai (se o download de B-roll das APIs falhar)
+    try:
+        ia_path = os.path.join(ASSETS_CACHE, f"ia_{hashlib.md5(api_query.encode()).hexdigest()[:12]}.jpg")
+        if generate_pollinations_image(keyword, ia_path):
+            if os.path.exists(ia_path) and os.path.getsize(ia_path) > 10240:
+                used_files.add(ia_path)
+                return ia_path
+    except Exception as e:
+        print(f"⚠️ [IA FALLBACK ERRO] Falha ao tentar gerar com Pollinations: {e}")
+    
+    # 4. FALLBACK FINAL: Gerador de Quadro de Contexto "Elite" (Pillow com Gradiente e Grid)
     # Isso garante que mesmo sem internet o vídeo tenha um visual aceitável e supere os 45KB do QC.
     try:
         emergency_path = os.path.join(ASSETS_CACHE, f"emergency_frame_{hashlib.md5(api_query.encode()).hexdigest()[:8]}.jpg")
         
-        # Cria um gradiente dinâmico para evitar compressão excessiva e passar no QC (>45KB)
-        img = Image.new('RGB', (1280, 720), color=(20, 25, 35))
+        # Cria um gradiente vibrante neon (Dracula/Cyberpunk theme)
+        img = Image.new('RGB', (1280, 720), color=(15, 10, 25))
         draw = ImageDraw.Draw(img)
         
-        # Adiciona gradiente diagonal
+        # Adiciona gradiente diagonal vibrante (ciano/roxo)
         for y in range(720):
-            r_c = 20 + int(y/12)
-            g_c = 25 + int(y/18)
-            b_c = 35 + int(y/25)
+            r_c = 15 + int(y/18)
+            g_c = 10 + int(y/30)
+            b_c = 40 + int(y/12)
             draw.line([(0, y), (1280, y)], fill=(r_c, g_c, b_c))
             
-        # Adiciona círculos de "bokeh" no fundo para dar profundidade e peso ao arquivo
-        for _ in range(12):
-            x, y = random.randint(0, 1280), random.randint(0, 720)
-            rad = random.randint(40, 180)
-            draw.ellipse([x-rad, y-rad, x+rad, y+rad], fill=(r_c+8, g_c+8, b_c+8))
+        # Adiciona grade tecnológica néon sutil para cara de editor de dados
+        grid_color = (0, 255, 204, 25)
+        for x in range(0, 1280, 60):
+            draw.line([(x, 0), (x, 720)], fill=grid_color, width=1)
+        for y in range(0, 720, 60):
+            draw.line([(0, y), (1280, y)], fill=grid_color, width=1)
 
-        img = img.filter(ImageFilter.GaussianBlur(radius=15))
+        # Adiciona círculos de "bokeh" no fundo para dar profundidade
+        for _ in range(8):
+            x, y = random.randint(0, 1280), random.randint(0, 720)
+            rad = random.randint(50, 150)
+            draw.ellipse([x-rad, y-rad, x+rad, y+rad], fill=(20, 0, 50, 40))
+
+        img = img.filter(ImageFilter.GaussianBlur(radius=8))
         draw = ImageDraw.Draw(img)
         
-        # Título centralizado
-        text = f"CONTEXT: {api_query.upper()}"
-        try:
-            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 42)
-        except:
-            font = ImageFont.load_default()
-            
-        draw.text((640, 360), text, fill=(0, 255, 204), anchor="mm", font=font)
+        # Caixa central tecnológica
+        draw.rectangle([100, 120, 1180, 600], outline=(0, 255, 204), width=3)
+        draw.line([(100, 200), (1180, 200)], fill=(0, 255, 204), width=2)
         
-        img.save(emergency_path, "JPEG", quality=96) # Alta qualidade garante >45KB
-        print(f"🎨 [DESIGN] Quadro de emergência premium gerado: {api_query}")
+        # Título no topo da caixa
+        try:
+            font_header = ImageFont.truetype("C:/Windows/Fonts/consolab.ttf", 32)
+            font_body = ImageFont.truetype("C:/Windows/Fonts/consolas.ttf", 26)
+        except:
+            font_header = ImageFont.load_default()
+            font_body = ImageFont.load_default()
+            
+        draw.text((640, 160), "SYSTEM TELEMETRY PIPELINE", fill=(0, 255, 204), anchor="mm", font=font_header)
+        
+        # Desenha o texto da keyword em múltiplas linhas centralizado
+        clean_desc = keyword.replace("cinematic", "").replace("4k", "").replace("8k", "").strip().upper()
+        words = clean_desc.split()
+        lines = [" ".join(words[i:i+6]) for i in range(0, len(words), 6)]
+        
+        y_text = 280
+        for line in lines[:4]:
+            draw.text((640, y_text), line, fill=(255, 255, 255), anchor="mm", font=font_body)
+            y_text += 45
+            
+        img.save(emergency_path, "JPEG", quality=96)
+        print(f"🎨 [DESIGN] Quadro de emergência premium gerado: {keyword}")
         return emergency_path
     except Exception as e:
         print(f"❌ [PIL ERROR] {e}")
         return None
 
-def generate_quiz_frame(quiz_data, job_id):
-    """Gera um frame visual para o Quiz usando PIL."""
+def generate_quiz_frame(quiz_data, job_id, job_data=None):
+    """Gera um frame visual para o Quiz usando PIL no idioma adequado."""
     try:
         quiz_path = os.path.join(OUTPUT_DIR, f"quiz_{job_id}.jpg")
         
-        # Fundo Cinematográfico Escuro
+        # Obter idioma do job
+        lang = "en-US"
+        if job_data:
+            lang = job_data.get("language") or job_data.get("target_language") or "en-US"
+            
+        # Traduções
+        header_by_lang = {
+            "en-US": "🧠 QUICK BRAIN TEST",
+            "pt-BR": "🧠 TESTE DE CÉREBRO RÁPIDO",
+            "es-ES": "🧠 TEST DE CEREBRO RÁPIDO",
+            "fr-FR": "🧠 TEST CÉRÉBRAL RAPIDE",
+            "de-DE": "🧠 SCHNELLER GEHIRNTEST"
+        }
+        fallback_opts_by_lang = {
+            "en-US": ["Option A", "Option B", "Option C", "Option D"],
+            "pt-BR": ["Opção A", "Opção B", "Opção C", "Opção D"],
+            "es-ES": ["Opción A", "Opción B", "Opción C", "Opción D"],
+            "fr-FR": ["Option A", "Option B", "Option C", "Option D"],
+            "de-DE": ["Option A", "Option B", "Option C", "Option D"]
+        }
+        
+        header_text = header_by_lang.get(lang, header_by_lang["en-US"])
+        
+        # Fundo Cinematográfico Escuro com gradiente
         img = Image.new('RGB', (1280, 720), color=(10, 15, 25))
         draw = ImageDraw.Draw(img)
         
-        # Gradiente e Detalhes de Fundo
         for y in range(720):
             draw.line([(0, y), (1280, y)], fill=(10+int(y/20), 15+int(y/30), 25+int(y/40)))
         
@@ -730,12 +1400,11 @@ def generate_quiz_frame(quiz_data, job_id):
             font_title = font_q = font_opt = ImageFont.load_default()
 
         # Cabeçalho
-        draw.text((640, 80), "🧠 QUICK BRAIN TEST", fill=(0, 255, 204), anchor="mm", font=font_title)
+        draw.text((640, 80), header_text, fill=(0, 255, 204), anchor="mm", font=font_title)
         draw.line([(300, 120), (980, 120)], fill=(0, 255, 204), width=3)
 
         # Pergunta
-        question = quiz_data.get("question", "What is the future of AI?")
-        # Quebra de linha simples para a pergunta
+        question = quiz_data.get("question") or quiz_data.get("pergunta") or "What is the future of AI?"
         words = question.split()
         lines = [" ".join(words[i:i+8]) for i in range(0, len(words), 8)]
         y_text = 200
@@ -743,8 +1412,16 @@ def generate_quiz_frame(quiz_data, job_id):
             draw.text((640, y_text), line, fill=(255, 255, 255), anchor="mm", font=font_q)
             y_text += 45
 
-        # Opções
-        options = quiz_data.get("options", ["Option A", "Option B", "Option C"])
+        # Opções/Respostas do roteiro
+        options = quiz_data.get("answers") or quiz_data.get("options") or quiz_data.get("respostas")
+        if not options or not isinstance(options, list):
+            options = fallback_opts_by_lang.get(lang, fallback_opts_by_lang["en-US"])
+            
+        # Garante que temos pelo menos 3 opções
+        options = list(options)
+        while len(options) < 3:
+            options.append(f"Option {chr(65+len(options))}")
+
         y_opt = 420
         colors = [(255, 215, 0), (0, 200, 255), (150, 255, 100), (255, 100, 100)]
         for i, opt in enumerate(options[:4]):
@@ -754,7 +1431,7 @@ def generate_quiz_frame(quiz_data, job_id):
             y_opt += 80
 
         img.save(quiz_path, "JPEG", quality=95)
-        print(f"🧠 [QUIZ] Frame visual gerado para o Quiz.")
+        print(f"🧠 [QUIZ] Frame visual gerado para o Quiz em [{lang}].")
         return quiz_path
     except Exception as e:
         print(f"❌ [QUIZ ERROR] {e}")
@@ -777,11 +1454,87 @@ def generate_subtitles_locally(audio_path, job_id):
         print(f"⚠️ Erro na transcrição: {e}")
         return None
 
+def adapt_srt_for_shorts(original_srt_path: str, output_srt_path: str, max_chars_per_line: int = 24) -> str:
+    """
+    Lê o arquivo SRT original e gera uma versão otimizada para Shorts,
+    garantindo que nenhuma linha de legenda ultrapasse max_chars_per_line.
+    Insere quebras de linha de forma inteligente entre as palavras.
+    """
+    if not original_srt_path or not os.path.exists(original_srt_path):
+        return original_srt_path
+        
+    try:
+        with open(original_srt_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        import re
+        # Separa por blocos usando quebra de linha dupla (padrão SRT)
+        blocks = re.split(r'\n\s*\n', content.strip())
+        new_blocks = []
+        
+        for block in blocks:
+            lines = block.split("\n")
+            if len(lines) < 3:
+                new_blocks.append(block)
+                continue
+                
+            block_id = lines[0]
+            timestamps = lines[1]
+            text = " ".join(lines[2:]).strip()
+            
+            # Divide o texto em linhas curtas de no máximo max_chars_per_line
+            words = text.split()
+            formatted_lines = []
+            current_line = ""
+            
+            for word in words:
+                if len(word) >= max_chars_per_line:
+                    if current_line:
+                        formatted_lines.append(current_line)
+                    formatted_lines.append(word)
+                    current_line = ""
+                elif len(current_line) + len(word) + 1 <= max_chars_per_line:
+                    if current_line:
+                        current_line += " " + word
+                    else:
+                        current_line = word
+                else:
+                    formatted_lines.append(current_line)
+                    current_line = word
+                    
+            if current_line:
+                formatted_lines.append(current_line)
+                
+            # Limita a no máximo 3 linhas por bloco nos Shorts
+            formatted_lines = formatted_lines[:3]
+            
+            new_block = f"{block_id}\n{timestamps}\n" + "\n".join(formatted_lines)
+            new_blocks.append(new_block)
+            
+        with open(output_srt_path, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(new_blocks) + "\n\n")
+            
+        print(f"📝 [Shorts SRT] Legenda otimizada para formato vertical 9:16 gerada em: {output_srt_path}")
+        return output_srt_path
+    except Exception as e:
+        print(f"⚠️ [Shorts SRT Adaptation] Erro ao reformatar legenda para Shorts: {e}")
+        return original_srt_path
+
 # ==========================================
 # 4. MONTAGEM FINAL
 # ==========================================
 
 def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_durations, total_audio_sec, job_data, is_short=False, music_mood="suspense", sfx_paths=[], thumb_path=None):
+    def to_relative_args(args_list):
+        base_dir = os.path.abspath(".")
+        res = []
+        for arg in args_list:
+            if isinstance(arg, str) and os.path.isabs(arg) and arg.startswith(base_dir):
+                res.append(os.path.relpath(arg, base_dir))
+            else:
+                res.append(arg)
+        return res
+
     # Criar links ou cópias curtas para evitar o WinError 206 (limite de tamanho de linha de comando no Windows)
     temp_dir = os.path.join(OUTPUT_DIR, f"tmp_in_{job_id}")
     os.makedirs(temp_dir, exist_ok=True)
@@ -797,28 +1550,23 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     video_paths_original = video_paths.copy()
     sfx_paths_original = sfx_paths.copy()
 
-    # Deduplicate video/image inputs
-    unique_video_paths = []
-    video_path_to_uniq_idx = {}
-    for p in video_paths:
-        if p not in video_path_to_uniq_idx:
-            video_path_to_uniq_idx[p] = len(unique_video_paths)
-            unique_video_paths.append(p)
-
-    unique_short_video_paths = []
-    for idx, p in enumerate(unique_video_paths):
-        ext = os.path.splitext(p)[1] or (".png" if p.lower().endswith(('.jpg', '.jpeg', '.png')) else ".mp4")
-        short_path = os.path.join(temp_dir, f"v_uniq_{idx}{ext}")
+    # NÃO deduplica caminhos de vídeo para evitar decodificação concorrente/reuso de streams no FFmpeg!
+    # Cada cena/fragmento terá o seu próprio input físico exclusivo no comando do FFmpeg.
+    scene_video_paths = []
+    for idx, p in enumerate(video_paths):
+        ext = os.path.splitext(p)[1] or (".png" if p.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) else ".mp4")
+        short_path = os.path.join(temp_dir, f"v_scene_{idx}{ext}")
         try:
             if os.path.exists(short_path): os.remove(short_path)
             shutil.copy2(p, short_path)
         except Exception as e:
-            print(f"⚠️ Erro ao copiar input temporário: {e}")
+            print(f"⚠️ Erro ao copiar input temporário de cena {idx}: {e}")
             short_path = p
-        unique_short_video_paths.append(short_path)
+        scene_video_paths.append(short_path)
 
-    # Map each scene's video path to its short path
-    scene_video_paths = [unique_short_video_paths[video_path_to_uniq_idx[p]] for p in video_paths]
+    # A lista de inputs únicos é exatamente a lista de cenas individuais
+    unique_short_video_paths = scene_video_paths
+    unique_video_paths = video_paths
 
     # Deduplicate SFX inputs
     unique_sfx_paths = []
@@ -876,6 +1624,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     w, h = (720, 1280) if is_short else (1280, 720)
     
     output_long = os.path.join(OUTPUT_DIR, f"final_{job_id}.mp4")
+    output_long_clean = os.path.join(OUTPUT_DIR, f"clean_{job_id}.mp4") if not is_short else output_long
     output_shorts = os.path.join(OUTPUT_DIR, f"shorts_{job_id}.mp4")
     filter_script_path = os.path.join(OUTPUT_DIR, f"filter_{job_id}.txt")
     
@@ -883,7 +1632,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     # 1. PROCESSAMENTO DE CADA CENA
     for i, dur in enumerate(clip_durations):
         v_path = scene_video_paths[i]
-        is_image = v_path.lower().endswith(('.jpg', '.jpeg', '.png'))
+        is_image = v_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
         num_frames = int(dur * 30) + 1
         
         # Base de processamento: Redimensionar e ajustar FPS
@@ -891,7 +1640,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
         # Mas como estamos usando entradas numeradas, vamos tratar via filtros
         
         # Efeito Visual de Acordo com Posição da Cena
-        is_hook_scene = (i < 3 and not is_short)  # Primeiras 3 cenas do vídeo longo = hook especial
+        is_hook_scene = (i < 3 and not is_short) or (i == 0 and is_short)  # Hook de vídeo longo ou primeira cena do Short
         
         if is_image:
             if is_hook_scene:
@@ -907,21 +1656,18 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
                     z_val = f"max(zoom-{zoom_speed},1.0)"
                 visual_fx = f"scale=4000:-1,zoompan=z='{z_val}':d={num_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30,trim=duration={dur}"
         else:
-            # Para VÍDEOS: Adiciona movimento sutil (Slow Zoom) para evitar visual estático
-            zoom_speed = random.uniform(0.0003, 0.0008)
-            # Para vídeos, usamos scale + crop dinâmico para simular zoom sem o peso do zoompan
-            zoom_factor = f"(1+0.15*t/{dur})" # Zoom de 15% ao longo da duração
-            visual_fx = f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h},scale=w='{w}*{zoom_factor}':h=-1:eval=frame,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
+            # Para VÍDEOS: Usamos escala e crop estáticos e robustos, evitando resoluções dinâmicas que congelam o FFmpeg/QSV no Windows.
+            # Como os vídeos de B-roll já possuem movimento natural, a escala estática mantém o fluxo 100% fluido e compatível.
+            visual_fx = f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
             
             if is_hook_scene:
-                # HOOK: Acelerado (Sem tremor, apenas zoom limpo para estética B2B)
-                zoom_factor = f"(1+0.25*t/{dur})" # Zoom mais agressivo para o hook
-                visual_fx = f"scale=w={w}:h={h}:force_original_aspect_ratio=increase,crop={w}:{h},scale=w='{w}*{zoom_factor}':h=-1:eval=frame,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
+                # HOOK: Usamos uma escala estática maior (zoom estático de 1.15x) para aproximar o centro e dar forte pacing
+                visual_fx = f"scale=w={int(w*1.15)}:h={int(h*1.15)}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30,trim=duration={dur}"
 
         # Camada de Estilo Sênior: Color Grade Teal & Orange Profissional
         if is_hook_scene:
-            # Hook: Look "Blockbuster" + B2B Premium
-            style_fx = "eq=brightness=0.03:contrast=1.1:saturation=1.1,unsharp=5:5:1.5:5:5:0.5,vignette=angle=0.6,noise=alls=12:allf=t,format=yuv420p"
+            # Hook: Look Blockbuster + Impact Flash Exponencial nos primeiros 0.4s + Granulado Analógico Estético de Alta Retenção
+            style_fx = "eq=brightness='0.03+0.2*exp(-6*t)':contrast='1.1+0.5*exp(-6*t)':saturation=1.25,unsharp=5:5:1.5:5:5:0.5,vignette=angle=0.65,noise=alls=15:allf=t,format=yuv420p"
         else:
             # Padrão: Cinematic soft + B2B Premium
             style_fx = "eq=brightness=0.03:contrast=1.1:saturation=1.1,unsharp=3:3:0.8:3:3:0.4,vignette=angle=0.5,noise=alls=7:allf=t,format=yuv420p"
@@ -930,16 +1676,15 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
         # scene_visual_cues is built in render_video() and passed via job_data
         scene_cues_map = job_data.get("_scene_visual_cues", []) if job_data else []
         if i < len(scene_cues_map) and scene_cues_map[i]:
-            visual_fx = _apply_visual_cue_fx(visual_fx, scene_cues_map[i], dur)
+            visual_fx = _apply_visual_cue_fx(visual_fx, scene_cues_map[i], dur, is_image=is_image, w=w, h=h)
         
         # Transição: fade mais lento no hook para maior impacto
         fade_dur = 1.2 if is_hook_scene else 0.7
         fade_in = "" if i == 0 else f"fade=t=in:st=0:d={fade_dur},"
         trans_fx = f"{fade_in}fade=t=out:st={max(0, dur-fade_dur)}:d={fade_dur}"
         
-        uniq_idx = video_path_to_uniq_idx[video_paths_original[i]]
-        input_idx = 1 + uniq_idx
-        filter_complex += f"[{input_idx}:v]{visual_fx},{style_fx},{trans_fx},setpts=PTS-STARTPTS[v{i}];"
+        input_idx = 1 + i
+        filter_complex += f"[{input_idx}:v]{visual_fx},{style_fx},{trans_fx},setsar=1,setpts=PTS-STARTPTS[v{i}];"
 
     
     concat_nodes = "".join([f"[v{i}]" for i in range(len(video_paths))])
@@ -977,7 +1722,10 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             # Short Principal sem thumb
             filter_complex += f"{concat_nodes}concat=n={len(video_paths)}:v=1:a=0[concat_v];[concat_v]subtitles='{safe_srt}':force_style='Alignment=2,FontSize=12,Outline=1,Shadow=1,MarginV=90,PrimaryColour=&H00FFFF&'[v_final];"
     else:
-        filter_complex += f"{concat_nodes}concat=n={len(video_paths)}:v=1:a=0[v_final];"
+        # Vídeo Longo: Gerado de forma limpa, as legendas serão queimadas no estágio final para evitar legenda dupla nos Shorts!
+        filter_complex += (
+            f"{concat_nodes}concat=n={len(video_paths)}:v=1:a=0[v_final];"
+        )
     
     # 2. MIXAGEM DE ÁUDIO DINÂMICA
     # loudnorm = Normalização EBU R128 (padrão YouTube/Spotify: I=-14 LUFS, TP=-1.5 dB)
@@ -986,7 +1734,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     
     if has_music:
         music_idx = num_uniq_videos + 1
-        filter_complex += f"[{music_idx}:a]volume=0.10,aloop=loop=-1:size=2e+09[bgm];"
+        filter_complex += f"[{music_idx}:a]volume=0.04,aloop=loop=-1:size=2e+09[bgm];"
         
         # 3. MIXAGEM DE SFX (SE HOUVER)
         sfx_nodes = []
@@ -1004,16 +1752,16 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
                 
         if sfx_nodes:
             sfx_concat = "".join(sfx_nodes)
-            filter_complex += f"[voice][bgm]{sfx_concat}amix=inputs={2+len(sfx_nodes)}:duration=first[a_final]"
+            filter_complex += f"[voice][bgm]{sfx_concat}amix=inputs={2+len(sfx_nodes)}:duration=first:normalize=0[a_final]"
         else:
-            filter_complex += "[voice][bgm]amix=inputs=2:duration=first[a_final]"
+            filter_complex += "[voice][bgm]amix=inputs=2:duration=first:normalize=0[a_final]"
     else:
         # Fallback para o arquivo local se a busca falhar
         bg_music_fallback = get_resource_path("channel_setup/assets/audio/background_suspense.mp3")
         if os.path.exists(bg_music_fallback):
             music_idx = num_uniq_videos + 1
-            filter_complex += f"[{music_idx}:a]volume=0.10,aloop=loop=-1:size=2e+09[bgm];"
-            filter_complex += "[voice][bgm]amix=inputs=2:duration=first[a_final]"
+            filter_complex += f"[{music_idx}:a]volume=0.04,aloop=loop=-1:size=2e+09[bgm];"
+            filter_complex += "[voice][bgm]amix=inputs=2:duration=first:normalize=0[a_final]"
         else:
             filter_complex += "[voice]copy[a_final]"
 
@@ -1023,7 +1771,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     args_long = [ffmpeg_exe, "-i", audio_path]
     for idx, p in enumerate(unique_short_video_paths):
         orig_p = unique_video_paths[idx]
-        is_image = orig_p.lower().endswith(('.jpg', '.jpeg', '.png'))
+        is_image = p.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
         if is_image:
             args_long.extend(["-loop", "1", "-framerate", "30", "-i", p])
         else:
@@ -1049,38 +1797,75 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
     # Para Longos: usa a duração exata da narração
     output_duration = min(total_audio_sec, 58) if is_short else total_audio_sec
     
+    # Autodetecta o melhor codificador H.264
+    best_enc = detect_best_encoder()
+    
     args_long.extend([
         "-filter_complex_script", filter_script_path,
         "-map", "[v_final]", "-map", "[a_final]",
-        "-c:v", "h264_qsv", "-preset", "medium", "-pix_fmt", "nv12", "-b:v", "8M", "-maxrate:v", "12M", "-bufsize:v", "16M", 
-        "-t", str(output_duration),
-        output_long, "-y"
+        "-c:v", best_enc["encoder"],
+        "-preset", best_enc["preset"],
+        "-pix_fmt", best_enc["pix_fmt"]
     ])
     
-    print(f"🎬 [FFMPEG] Renderizando com CINEMATIC FX e ÁUDIO DINÂMICO...")
-    use_qsv = True
-    res_long = subprocess.run(args_long, capture_output=True, text=True)
+    if best_enc["args"]:
+        args_long.extend(best_enc["args"])
+        
+    args_long.extend([
+        "-t", str(output_duration),
+        output_long_clean, "-y"
+    ])
+    
+    print(f"🎬 [FFMPEG] Renderizando com CINEMATIC FX e ÁUDIO DINÂMICO ({best_enc['encoder']} - {best_enc['preset']})...")
+    res_long = subprocess.run(to_relative_args(args_long), capture_output=True, text=True)
     
     if res_long.returncode != 0:
-        print(f"⚠️ [QSV FAIL] Tentando fallback para CPU (libx264)...")
-        use_qsv = False
+        print(f"⚠️ [RENDER FAIL] Falha na aceleração {best_enc['encoder']}. Tentando fallback universal de CPU (libx264 ultrafast)...")
         args_long_cpu = args_long.copy()
-        # Substitui encoder QSV por Software
-        idx_cv = args_long_cpu.index("-c:v")
-        args_long_cpu[idx_cv+1] = "libx264"
-        args_long_cpu[idx_cv+2] = "-preset"
-        args_long_cpu[idx_cv+3] = "veryfast"
-        # Ajusta pix_fmt para software
-        idx_pix = args_long_cpu.index("-pix_fmt")
-        args_long_cpu[idx_pix+1] = "yuv420p"
         
-        res_long = subprocess.run(args_long_cpu, capture_output=True, text=True)
+        # Encontra e substitui codecs e presets para o fallback de software universal
+        try:
+            # Substitui o encoder
+            idx_cv = args_long_cpu.index("-c:v")
+            args_long_cpu[idx_cv+1] = "libx264"
+            
+            # Substitui ou adiciona o preset
+            if "-preset" in args_long_cpu:
+                idx_pr = args_long_cpu.index("-preset")
+                args_long_cpu[idx_pr+1] = "ultrafast"
+            else:
+                args_long_cpu.insert(idx_cv+2, "-preset")
+                args_long_cpu.insert(idx_cv+3, "ultrafast")
+                
+            # Garante pix_fmt compatível
+            if "-pix_fmt" in args_long_cpu:
+                idx_pix = args_long_cpu.index("-pix_fmt")
+                args_long_cpu[idx_pix+1] = "yuv420p"
+            else:
+                args_long_cpu.insert(idx_cv+4, "-pix_fmt")
+                args_long_cpu[idx_cv+5] = "yuv420p"
+                
+            # Remove argumentos de QSV se existirem
+            for arg_to_remove in ["-b:v", "8M", "-maxrate:v", "12M", "-bufsize:v", "16M"]:
+                if arg_to_remove in args_long_cpu:
+                    idx_r = args_long_cpu.index(arg_to_remove)
+                    args_long_cpu.pop(idx_r)  # remove o nome do arg
+                    args_long_cpu.pop(idx_r)  # remove o valor
+        except Exception as e:
+            print(f"⚠️ [Fallback Cmd Builder] Erro ao reajustar argumentos: {e}")
+            
+        res_long = subprocess.run(to_relative_args(args_long_cpu), capture_output=True, text=True)
         if res_long.returncode != 0:
             print(f"❌ [FFMPEG CRITICAL ERROR]\n{res_long.stderr}")
             cleanup(); return False
 
     if not is_short:
         print("📱 [SHORTS] Gerando 3 Shorts virais de 59 segundos...")
+        
+        # Adapta o arquivo SRT para formato vertical dos Shorts (max 24 caracteres por linha)
+        short_srt_path = srt_path.replace(".srt", "_shorts.srt")
+        adapt_srt_for_shorts(srt_path, short_srt_path, max_chars_per_line=24)
+        safe_srt_shorts = short_srt_path.replace("\\", "/").replace(":", "\\:")
         
         # [NOVO] Gerar Thumbnail Vertical (9:16)
         short_thumb_path = None
@@ -1090,14 +1875,15 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             # Usamos o topic e o job_id disponíveis na assemble_production
             short_thumb_res = orchestrate_thumbnail_generation(
                 job_id=job_id, title=topic, language="en-US",
-                niche="Tech", video_file_path=output_long, is_short=True
+                niche="Tech", video_file_path=output_long_clean, is_short=True
             )
             short_thumb_path = short_thumb_res.get("selected_thumbnail", {}).get("path")
         except Exception as e:
             print(f"⚠️ [SHORTS] Erro ao gerar thumb: {e}")
 
-        encoder = "h264_qsv" if use_qsv else "libx264"
-        pix_fmt = "nv12" if use_qsv else "yuv420p"
+        encoder = best_enc["encoder"]
+        pix_fmt = best_enc["pix_fmt"]
+        preset_shorts = best_enc["preset"]
 
         for i in range(1, 4):
             # [NOVO] Thumbnail Única para cada Short
@@ -1108,7 +1894,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
                 short_thumb_res = orchestrate_thumbnail_generation(
                     job_id=f"{job_id}_{i}", title=f"{topic} (Part {i})", 
                     language=job_data.get("language", "en-US"),
-                    niche="Tech", video_file_path=output_long, is_short=True
+                    niche="Tech", video_file_path=output_long_clean, is_short=True
                 )
                 current_short_thumb = short_thumb_res.get("selected_thumbnail", {}).get("path")
             except Exception as e:
@@ -1117,37 +1903,92 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
             out_short = os.path.join(OUTPUT_DIR, f"shorts_{i}_{job_id}.mp4")
             start_time = (i - 1) * 65  # Short 1 = 0s, Short 2 = 65s, Short 3 = 130s
             
-            # Filtro dos Shorts (com legendas burn-in e injeção de Thumbnail nos primeiros 0.5s)
+            # Filtro dos Shorts (com legendas burn-in de alto impacto e crop central imersivo 9:16)
             if current_short_thumb and os.path.exists(current_short_thumb):
-                filter_shorts = f"[0:v]split=2[bg_in][fg_in];[bg_in]scale=720:1280,boxblur=20:10,setsar=1[bg];[fg_in]scale=720:-2,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base];[base]subtitles='{safe_srt}':force_style='Alignment=2,FontSize=12,Outline=1,Shadow=1,MarginV=90,PrimaryColour=&H00FFFF&'[withsubs];[1:v]scale=720:1280,setsar=1[thumb];[withsubs][thumb]overlay=0:0:enable='between(t,0,0.5)',setdar=9/16[outv]"
+                filter_shorts = (
+                    "[0:v]scale=-1:1280,crop=720:1280,eq=contrast=1.15:saturation=1.2,setsar=1[cropped];"
+                    f"[cropped]subtitles='{safe_srt_shorts}':force_style='Alignment=2,FontSize=15,Outline=1.8,Shadow=1,MarginV=140,PrimaryColour=&H00FFFF&'[withsubs];"
+                    "[1:v]scale=720:1280,setsar=1[thumb];[withsubs][thumb]overlay=0:0:enable='between(t,0,0.5)',setdar=9/16[outv]"
+                )
                 args_shorts = [
-                    ffmpeg_exe, "-ss", str(start_time), "-i", output_long, "-loop", "1", "-i", current_short_thumb, "-filter_complex", filter_shorts,
-                    "-map", "[outv]", "-map", "0:a", "-c:v", encoder, "-preset", "veryfast", "-pix_fmt", pix_fmt,
+                    ffmpeg_exe, "-ss", str(start_time), "-i", output_long_clean, "-loop", "1", "-i", current_short_thumb, "-filter_complex", filter_shorts,
+                    "-map", "[outv]", "-map", "0:a", "-c:v", encoder, "-preset", preset_shorts, "-pix_fmt", pix_fmt,
                     "-aspect", "9:16", "-t", "59", "-c:a", "copy", out_short, "-y"
                 ]
             else:
-                filter_shorts = f"[0:v]split=2[bg_in][fg_in];[bg_in]scale=720:1280,boxblur=20:10,setsar=1[bg];[fg_in]scale=720:-2,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,setdar=9/16,subtitles='{safe_srt}':force_style='Alignment=2,FontSize=12,Outline=1,Shadow=1,MarginV=90,PrimaryColour=&H00FFFF&'[outv]"
+                filter_shorts = (
+                    "[0:v]scale=-1:1280,crop=720:1280,eq=contrast=1.15:saturation=1.2,setsar=1[cropped];"
+                    f"[cropped]subtitles='{safe_srt_shorts}':force_style='Alignment=2,FontSize=15,Outline=1.8,Shadow=1,MarginV=140,PrimaryColour=&H00FFFF&'[outv]"
+                )
                 args_shorts = [
-                    ffmpeg_exe, "-ss", str(start_time), "-i", output_long, "-filter_complex", filter_shorts,
-                    "-map", "[outv]", "-map", "0:a", "-c:v", encoder, "-preset", "veryfast", "-pix_fmt", pix_fmt,
+                    ffmpeg_exe, "-ss", str(start_time), "-i", output_long_clean, "-filter_complex", filter_shorts,
+                    "-map", "[outv]", "-map", "0:a", "-c:v", encoder, "-preset", preset_shorts, "-pix_fmt", pix_fmt,
                     "-aspect", "9:16", "-t", "59", "-c:a", "copy", out_short, "-y"
                 ]
             
-            res_shorts = subprocess.run(args_shorts, shell=False)
+            res_shorts = subprocess.run(to_relative_args(args_shorts), shell=False)
             if res_shorts.returncode != 0:
                 print(f"❌ [FFMPEG ERROR] Falha no Shorts {i}.")
-                # Se falhar usando o encoder configurado, tenta um último fallback de emergência usando libx264
-                if encoder == "h264_qsv":
-                    print("⚠️ Tentando renderizar Short com software fallback (libx264)...")
+                # Se falhar usando o encoder configurado, tenta um último fallback de emergência usando libx264 ultrafast
+                if encoder != "libx264":
+                    print("⚠️ Tentando renderizar Short com software fallback (libx264 ultrafast)...")
                     args_shorts_cpu = args_shorts.copy()
-                    idx_cv_sh = args_shorts_cpu.index("-c:v")
-                    args_shorts_cpu[idx_cv_sh+1] = "libx264"
-                    args_shorts_cpu[idx_cv_sh+4] = "yuv420p"
-                    res_shorts = subprocess.run(args_shorts_cpu, shell=False)
+                    try:
+                        idx_cv_sh = args_shorts_cpu.index("-c:v")
+                        args_shorts_cpu[idx_cv_sh+1] = "libx264"
+                        
+                        if "-preset" in args_shorts_cpu:
+                            idx_pr_sh = args_shorts_cpu.index("-preset")
+                            args_shorts_cpu[idx_pr_sh+1] = "ultrafast"
+                        else:
+                            args_shorts_cpu.insert(idx_cv_sh+2, "-preset")
+                            args_shorts_cpu.insert(idx_cv_sh+3, "ultrafast")
+                            
+                        if "-pix_fmt" in args_shorts_cpu:
+                            idx_px_sh = args_shorts_cpu.index("-pix_fmt")
+                            args_shorts_cpu[idx_px_sh+1] = "yuv420p"
+                        else:
+                            args_shorts_cpu.insert(idx_cv_sh+4, "-pix_fmt")
+                            args_shorts_cpu[idx_cv_sh+5] = "yuv420p"
+                    except Exception as e:
+                        print(f"⚠️ [Short Fallback Index Error] {e}")
+                        
+                    res_shorts = subprocess.run(to_relative_args(args_shorts_cpu), shell=False)
                     if res_shorts.returncode == 0:
                         print(f"✅ Short {i} recuperado via software fallback!")
                         continue
                 cleanup(); return False
+
+        # Gravar legendas finais de vídeo longo no output_long real a partir do clean
+        print("🎬 [FFMPEG] Gravando legendas definitivas no vídeo longo oficial...")
+        best_enc = detect_best_encoder()
+        args_burn = [
+            ffmpeg_exe, "-i", output_long_clean,
+            "-vf", f"subtitles='{safe_srt}':force_style='Alignment=2,FontSize=18,Outline=2,Shadow=1,MarginV=50,PrimaryColour=&H00FFFF&'",
+            "-c:v", best_enc["encoder"], "-preset", best_enc["preset"],
+            "-pix_fmt", best_enc["pix_fmt"]
+        ]
+        if best_enc["args"]:
+            args_burn.extend(best_enc["args"])
+        args_burn.extend(["-c:a", "copy", output_long, "-y"])
+        
+        res_burn = subprocess.run(to_relative_args(args_burn), capture_output=True, text=True)
+        if res_burn.returncode != 0:
+            print("⚠️ Falha na gravação de legendas por hardware. Usando fallback CPU...")
+            args_burn_cpu = [
+                ffmpeg_exe, "-i", output_long_clean,
+                "-vf", f"subtitles='{safe_srt}':force_style='Alignment=2,FontSize=18,Outline=2,Shadow=1,MarginV=50,PrimaryColour=&H00FFFF&'",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:a", "copy", output_long, "-y"
+            ]
+            subprocess.run(to_relative_args(args_burn_cpu), shell=False)
+            
+        # Deletar o arquivo temporário limpo do vídeo longo para liberar espaço
+        try:
+            if os.path.exists(output_long_clean):
+                os.remove(output_long_clean)
+        except:
+            pass
 
     try: os.remove(filter_script_path)
     except: pass
@@ -1157,7 +1998,7 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
 # 5. RENDER E START
 # ==========================================
 
-def _apply_visual_cue_fx(base_visual_fx: str, cues: list, dur: float) -> str:
+def _apply_visual_cue_fx(base_visual_fx: str, cues: list, dur: float, is_image: bool = False, w: int = 1280, h: int = 720) -> str:
     """
     Maps visual_cues from the Retention Engine JSON to FFmpeg filter modifiers.
     Called per-scene to inject dynamic micro-pacing into the filter_complex.
@@ -1170,9 +2011,19 @@ def _apply_visual_cue_fx(base_visual_fx: str, cues: list, dur: float) -> str:
     cue_types = [c.get("type", "") for c in cues if isinstance(c, dict)]
     dominant = cue_types[0] if cue_types else ""
 
+    # Para IMAGENS, o zoompan (Ken Burns) nativo funciona perfeitamente.
+    # Para VÍDEOS, o zoompan nativo do FFmpeg congela o vídeo no primeiro frame.
+    # Portanto, mapeamos zoom_in e zoom_out para cortes estáticos escalados estáveis.
+    if is_image:
+        zoom_in_modifier = f"scale=w='min(iw*1.25,4000)':h=-1,zoompan=z='min(zoom+0.003,1.4)':d={int(dur*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+        zoom_out_modifier = f"scale=w='min(iw*1.3,4000)':h=-1,zoompan=z='max(zoom-0.003,1.0)':d={int(dur*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    else:
+        zoom_in_modifier = f"crop=w='iw/1.15':h='ih/1.15':x='(iw-ow)/2':y='(ih-oh)/2',scale={w}:{h}"
+        zoom_out_modifier = f"crop=w='iw/1.05':h='ih/1.05':x='(iw-ow)/2':y='(ih-oh)/2',scale={w}:{h}"
+
     fx_map = {
-        "zoom_in":      f"scale=w='min(iw*1.25,4000)':h=-1,zoompan=z='min(zoom+0.003,1.4)':d={int(dur*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
-        "zoom_out":     f"scale=w='min(iw*1.3,4000)':h=-1,zoompan=z='max(zoom-0.003,1.0)':d={int(dur*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+        "zoom_in":      zoom_in_modifier,
+        "zoom_out":     zoom_out_modifier,
         "glitch":       "hue=h='sin(2*PI*t)*30':s='1+0.3*sin(2*PI*t*3)',noise=alls=15:allf=t",
         "slow_motion":  f"setpts=1.5*PTS,fps=30,trim=duration={dur}",
         "freeze_frame": f"trim=end_frame=1,setpts=PTS*{int(dur*30)},fps=30,trim=duration={dur}",
@@ -1245,14 +2096,43 @@ def render_video(job_data):
             print("⚠️ Nenhuma cena encontrada no roteiro. Criando cena padrão...")
             scenes_list = [{"timestamp": "0:00-0:10", "narration": script_text[:500], "b_roll_visual": topic}]
 
+        assigned_paths = []
         used_assets = set()
+        
         def download_assets(scene, scene_index=0):
             visual_kw = scene.get("b_roll_visual", "AI technology")
             sfx_cue = scene.get("sfx_cue", "none")
+            scene_text = scene.get("narration", "")
             
-            # Hook Quality Gate: Para as 3 primeiras cenas do vídeo longo,
-            # força busca na API web se o B-Roll do prompt for específico (contém 'cinematic', 'dramatic', etc.)
-            # Isso garante que o hook tenha visuais impactantes, não cache genérico
+            # ─── 1. HOOK QUALITY ENGINE: Cena 0 ultra impactante ───
+            if scene_index == 0:
+                print(f"🔥 [HOOK ENGINE] Gerando visual dramático sob medida para o gancho do vídeo (Tópico: '{topic}')")
+                
+                # Criar prompt artístico dramático
+                hook_prompt = f"A dramatic cinematic premium illustration representing: '{topic}', hyper-realistic key art, epic style, intense red glowing accent lights, high contrast, masterpiece, trending on artstation"
+                
+                # Nome de arquivo seguro para o hook
+                safe_topic_id = hashlib.md5(topic.encode()).hexdigest()[:12]
+                hook_path = os.path.join(ASSETS_CACHE, f"hook_scene_{safe_topic_id}.jpg")
+                
+                success = False
+                if os.path.exists(hook_path) and os.path.getsize(hook_path) > 15000:
+                    success = True
+                    print(f"✅ [HOOK ENGINE] Usando imagem do gancho já existente no cache: {hook_path}")
+                else:
+                    success = generate_pollinations_image(hook_prompt, hook_path)
+                    
+                if success:
+                    used_assets.add(hook_path)
+                    # Força SFX de Impacto Dramático no Hook!
+                    p_sfx = fetch_sfx("cinematic impact") or fetch_sfx("impact")
+                    assigned_paths.append(hook_path)
+                    return hook_path, p_sfx
+                else:
+                    print("⚠️ [HOOK ENGINE] Falha ao gerar via Pollinations. Caindo para busca padrão.")
+
+            # ─── 2. BUSCA NORMAL DE MÍDIA ───
+            p_visual = None
             is_hook = (scene_index < 3 and not job_data.get("is_short", False))
             if is_hook:
                 import re, glob
@@ -1260,32 +2140,83 @@ def render_video(job_data):
                 words = [w for w in clean_kw.split() if w not in {"a","an","the","and","or","of","with","in","on","at"}]
                 api_query = " ".join(words[:4]) if words else visual_kw
                 safe_id = hashlib.md5(api_query.encode()).hexdigest()[:12]
-                # Verifica se já existe no cache com ID exato (mesma query)
                 cached_exact = os.path.join(ASSETS_CACHE, f"asset_{safe_id}.mp4")
-                if os.path.exists(cached_exact):
+                if os.path.exists(cached_exact) and cached_exact not in used_assets:
                     used_assets.add(cached_exact)
                     p_visual = cached_exact
                 else:
-                    # Força download novo da API para garantir B-Roll relevante
-                    p_visual = fetch_premium_broll(visual_kw, set())  # set() vazio = ignora restrições de cache
+                    p_visual = fetch_premium_broll(visual_kw, set(used_assets))
             else:
                 p_visual = fetch_premium_broll(visual_kw, used_assets)
+
+            # ─── 3. CONVERT REPETITION LIMIT ENGINE (MÁXIMO 2 REPETIÇÕES CONSECUTIVAS) ───
+            attempts = 0
+            temp_banned = set()
+            import re
             
-            p_sfx = fetch_sfx(sfx_cue) if sfx_cue != "none" else None
+            while p_visual and len(assigned_paths) >= 2 and assigned_paths[-1] == p_visual and assigned_paths[-2] == p_visual and attempts < 3:
+                attempts += 1
+                print(f"⚠️ [REPETIÇÃO DETECTADA] Cenas consecutivas repetindo a mesma mídia: {os.path.basename(p_visual)}")
+                print(f"🔄 Forçando variação na cena {scene_index} (Tentativa {attempts})...")
+                
+                temp_banned.add(p_visual)
+                combined_used = used_assets.union(temp_banned)
+                
+                # Tenta buscar uma variação com palavra-chave alternativa do próprio texto ou tema do vídeo
+                words_in_text = [w for w in re.sub(r'[^\w\s]', '', scene_text.lower()).split() if len(w) > 4]
+                alternative_kw = " ".join(words_in_text[:3]) if words_in_text else topic
+                
+                p_visual = fetch_premium_broll(alternative_kw, combined_used)
+                
+            # Se após as tentativas normais ainda for repetido,
+            # ou se a mídia for nula, geramos uma imagem novinha por IA com o conteúdo da narração da cena
+            if (p_visual and len(assigned_paths) >= 2 and assigned_paths[-1] == p_visual and assigned_paths[-2] == p_visual) or not p_visual:
+                print(f"🧠 [WORKER VARIATION] Gerando imagem de IA para cena {scene_index} para evitar repetição!")
+                
+                words_clean = [w for w in re.sub(r'[^\w\s]', '', scene_text.lower()).split() if len(w) > 3 and w not in {"para", "como", "mais", "sobre", "with", "shows", "then", "cuts"}]
+                scene_summary = " ".join(words_clean[:8]) if words_clean else visual_kw
+                
+                safe_scene_id = hashlib.md5(f"{scene_text}_{scene_index}".encode()).hexdigest()[:12]
+                fallback_ia_path = os.path.join(ASSETS_CACHE, f"scene_var_{safe_scene_id}.jpg")
+                
+                success_var = False
+                if os.path.exists(fallback_ia_path) and os.path.getsize(fallback_ia_path) > 15000:
+                    success_var = True
+                    print(f"✅ [WORKER VARIATION] Usando variação de imagem já existente: {fallback_ia_path}")
+                else:
+                    scene_prompt = f"cinematic detailed illustration of {scene_summary}, technical concept art, dramatic style, trending on artstation"
+                    success_var = generate_pollinations_image(scene_prompt, fallback_ia_path)
+                    
+                if success_var:
+                    p_visual = fallback_ia_path
+                    print(f"   ✅ [WORKER VARIATION] Imagem gerada com sucesso: {fallback_ia_path}")
+                else:
+                    print("   ⚠️ [WORKER VARIATION] Falha ao gerar Pollinations. Mantendo mídia atual para segurança.")
+
+            used_assets.add(p_visual)
+            assigned_paths.append(p_visual)
+            
+            # Força SFX 'whoosh' para transição se for cena > 0 e o roteiro não definiu SFX específico!
+            if scene_index > 0 and sfx_cue == "none":
+                p_sfx = fetch_sfx("whoosh")
+            else:
+                p_sfx = fetch_sfx(sfx_cue) if sfx_cue != "none" else None
+                
             return p_visual, p_sfx
 
-        # Execução síncrona para garantir que 'used_assets' impeça repetições
+        # Execução síncrona para garantir que 'used_assets' e 'assigned_paths' impeçam repetições
         downloaded_assets_list = [download_assets(s, idx) for idx, s in enumerate(scenes_list)]
-
 
         downloaded_paths = [a[0] for a in downloaded_assets_list]
         sfx_paths = [a[1] for a in downloaded_assets_list]
-        # Injeção Inteligente de SFX de transição para evitar silêncios pós-transições
+        
+        # Injeção Inteligente de SFX de fallback para silêncios pós-transições
         for idx in range(len(sfx_paths)):
             if sfx_paths[idx] is None:
+                # Se ainda for None por algum motivo ou se for uma transição importante
                 scene_text = str(scenes_list[idx].get("narration") or "").lower()
                 is_transition_word = any(w in scene_text for w in ["mais", "criação", "entretanto", "porém", "mais voici", "cependant", "toutefois", "but", "however", "yet"])
-                if idx % 6 == 0 or is_transition_word:
+                if idx > 0 and (idx % 3 == 0 or is_transition_word):
                     try:
                         sfx_paths[idx] = fetch_sfx("whoosh")
                         print(f"🎵 [SFX AUTO-INJECT] Injetando SFX 'whoosh' na cena {idx} para transição fluida.")
@@ -1312,9 +2243,10 @@ def render_video(job_data):
                 fb_path = os.path.join(OUTPUT_DIR, f"fallback_anim_{job_id}_{idx}.mp4")
                 if os.path.exists(fb_path):
                     return fb_path
-                geq_r = "if(lte(mod(X/W+T*0.05,1),0.5),26+10*sin(T*1.5+X/W*3.14),18+8*cos(T*1.2+Y/H*3.14))"
-                geq_g = "if(lte(mod(Y/H+T*0.04,1),0.5),10+5*sin(T*1.8+Y/H*2),8+4*cos(T*1.1+X/W*2))"
-                geq_b = "30+20*sin(T*0.8+X/W*1.5)*cos(T*0.6+Y/H*1.5)"
+                # Cores cyberpunk vibrantes (azul/ciano/roxo) com gradientes espaciais e temporais de alta entropia
+                geq_r = "50+40*sin(T*1.2+X/60)"
+                geq_g = "20+20*cos(T*1.5+Y/50)"
+                geq_b = "160+90*sin(T*0.8+(X+Y)/100)"
                 cmd = [
                     ffmpeg_exe, "-y",
                     "-f", "lavfi",
@@ -1328,12 +2260,12 @@ def render_video(job_data):
                         return fb_path
                 except Exception:
                     pass
-                # Fallback-do-fallback: ruído sobre cor escura
+                # Fallback-do-fallback: ruído analógico cinemático de alta intensidade sobre fundo roxo cyberpunk escuro
                 cmd2 = [
                     ffmpeg_exe, "-y",
                     "-f", "lavfi",
-                    "-i", f"color=c=0x1a1a2e:size=1280x720:rate=30:duration={dur}",
-                    "-vf", "noise=alls=12:allf=t,format=yuv420p",
+                    "-i", f"color=c=0x1a153a:size=1280x720:rate=30:duration={dur}",
+                    "-vf", "noise=alls=25:allf=t,format=yuv420p",
                     "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-an", fb_path
                 ]
                 try:
@@ -1381,7 +2313,7 @@ def render_video(job_data):
             quiz_data = script_obj.get("quiz")
             if quiz_data and isinstance(quiz_data, dict):
                 print(f"🧠 [Worker] Injetando cena de QUIZ no final...")
-                quiz_frame = generate_quiz_frame(quiz_data, job_id)
+                quiz_frame = generate_quiz_frame(quiz_data, job_id, job_data)
                 if quiz_frame:
                     cenas.append(quiz_frame)
                     sfx_paths.append(fetch_sfx("ding") or None)
@@ -1563,6 +2495,7 @@ def render_video(job_data):
             job=job_data, 
             video_path=check_path, 
             thumbnail_path=thumb_path,
+            srt_path=final_srt_path if job_data.get("type") != "SHORT" else None,
             channel_language=job_data.get("language", "en-US")
         )
         if not validator.execute_quality_control():
@@ -1593,11 +2526,11 @@ def render_video(job_data):
         try:
             with open(meta_path, "w", encoding="utf-8") as f:
                 f.write(f"TITLE: {topic}\n")
-                f.write(f"{"="*40}\n")
+                f.write("="*40 + "\n")
                 f.write(f"DESCRIPTION:\n{script_obj.get('description', '')}\n")
-                f.write(f"{"="*40}\n")
+                f.write("="*40 + "\n")
                 f.write(f"TAGS: {', '.join(script_obj.get('tags', []))}\n")
-                f.write(f"{"="*40}\n")
+                f.write("="*40 + "\n")
                 f.write(f"PINNED COMMENT:\n{pinned_comment}\n")
         except: pass
         

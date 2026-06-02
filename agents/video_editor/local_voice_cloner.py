@@ -266,11 +266,92 @@ def generate_local_cloned_voice(text: str, language: str, ref_audio_path: str, o
             return True
         
     except ImportError as e:
-        logger.error(f"❌ [XTTSv2] Erro de importação de biblioteca: {e}")
-        print("\nCaso a biblioteca TTS esteja instalada mas falte alguma dependência C++, verifique os logs acima.")
-        print("Certifique-se de que rodou: pip install TTS torch torchvision torchaudio\n")
-        import traceback
-        traceback.print_exc()
+        logger.warning(f"⚠️ [XTTSv2] Não foi possível importar 'TTS' no ambiente atual: {e}")
+        
+        # Tenta disparar automaticamente via ponte (venv_clonagem) se disponível
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        venv_py = os.path.join(root_dir, "venv_clonagem", "Scripts", "python.exe")
+        
+        if os.path.exists(venv_py):
+            logger.info(f"🔄 [XTTSv2 Autoponte] Ativando ponte automática com venv_clonagem Python 3.11...")
+            
+            import tempfile
+            temp_txt_path = None
+            try:
+                # Cria arquivo temporário para o texto de narração
+                fd, temp_txt_path = tempfile.mkstemp(suffix=".txt", prefix="tts_auto_", text=True)
+                with os.fdopen(fd, "w", encoding="utf-8") as temp_f:
+                    temp_f.write(text)
+            except Exception as txt_err:
+                logger.error(f"⚠️ [XTTSv2 Autoponte] Falha ao criar arquivo de texto temporário: {txt_err}")
+                temp_txt_path = None
+                
+            if temp_txt_path and os.path.exists(temp_txt_path):
+                cmd = [
+                    venv_py, os.path.abspath(__file__), 
+                    "--text_file", temp_txt_path, 
+                    "--lang", language, 
+                    "--ref", os.path.abspath(ref_audio_path), 
+                    "--out", os.path.abspath(output_path)
+                ]
+                
+                clean_env = os.environ.copy()
+                if "PYTHONPATH" in clean_env:
+                    del clean_env["PYTHONPATH"]
+                
+                try:
+                    result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True, encoding="utf-8")
+                    if result.returncode == 0 and os.path.exists(output_path):
+                        logger.info("✅ [XTTSv2 Autoponte] Voz sintetizada com sucesso através da ponte automática!")
+                        success = True
+                    else:
+                        logger.error(f"❌ [XTTSv2 Autoponte] Falha na execução da ponte (código: {result.returncode})")
+                        if result.stderr:
+                            logger.error(f"[XTTSv2 Autoponte Stderr]: {result.stderr}")
+                        success = False
+                except Exception as sub_err:
+                    logger.error(f"❌ [XTTSv2 Autoponte] Erro ao iniciar subprocesso da ponte: {sub_err}")
+                    success = False
+                finally:
+                    try:
+                        os.remove(temp_txt_path)
+                    except:
+                        pass
+                
+                if success:
+                    return True
+            else:
+                # Se falhar o arquivo temporário, tenta passar via parâmetro CLI simples como fallback de 4000 chars
+                cmd = [
+                    venv_py, os.path.abspath(__file__), 
+                    "--text", text[:4000], 
+                    "--lang", language, 
+                    "--ref", os.path.abspath(ref_audio_path), 
+                    "--out", os.path.abspath(output_path)
+                ]
+                clean_env = os.environ.copy()
+                if "PYTHONPATH" in clean_env:
+                    del clean_env["PYTHONPATH"]
+                
+                try:
+                    result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True, encoding="utf-8")
+                    if result.returncode == 0 and os.path.exists(output_path):
+                        logger.info("✅ [XTTSv2 Autoponte] Voz sintetizada com sucesso através do parâmetro CLI de fallback!")
+                        return True
+                    else:
+                        logger.error(f"❌ [XTTSv2 Autoponte CLI] Falha na execução (código: {result.returncode})")
+                        if result.stderr:
+                            logger.error(f"[XTTSv2 Autoponte CLI Stderr]: {result.stderr}")
+                except Exception as sub_err:
+                    logger.error(f"❌ [XTTSv2 Autoponte CLI] Erro ao iniciar: {sub_err}")
+        else:
+            logger.error(f"❌ [XTTSv2] Erro de importação original: {e}")
+            logger.error(f"❌ [XTTSv2] Ponte 'venv_clonagem' não encontrada em: {venv_py}")
+            print("\nCaso a biblioteca TTS esteja instalada mas falte alguma dependência C++, verifique os logs acima.")
+            print("Certifique-se de que rodou: pip install TTS torch torchvision torchaudio\n")
+            import traceback
+            traceback.print_exc()
+            
         return False
     except Exception as e:
         logger.error(f"❌ [XTTSv2] Falha na clonagem: {e}")

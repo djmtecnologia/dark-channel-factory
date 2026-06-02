@@ -265,7 +265,7 @@ def assemble_video(
     audio_filter = f"[1:a]volume={NARRATION_VOLUME}[v_narr];"
     if has_bgm:
         audio_filter += f"[2:a]aloop=loop=-1:size=2e9,volume={MUSIC_VOLUME}[v_music];"
-        audio_filter += "[v_narr][v_music]amix=inputs=2:duration=first[a_final]"
+        audio_filter += "[v_narr][v_music]amix=inputs=2:duration=first:normalize=0[a_final]"
         audio_map = "[a_final]"
     else:
         audio_map = "[v_narr]"

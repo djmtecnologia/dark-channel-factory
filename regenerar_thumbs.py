@@ -123,12 +123,13 @@ def scan_videos():
 # Geradores de Imagem (todos salvam em 1280×720 via _save_resized)
 # ─────────────────────────────────────────────────────────────────────────────
 def _gen_dalle(context: str, output_path: str) -> bool:
-    """DALL-E 3 — melhor qualidade. Gera em 1792×1024 e redimensiona para 1280×720."""
+    """gpt-image-1 — melhor qualidade. Gera em 1536x1024 (16:9) e redimensiona para 1280×720."""
     openai_key = os.getenv("OPENAI_API_KEY", "")
     if not openai_key:
         return False
     try:
         from openai import OpenAI
+        import base64
         client = OpenAI(api_key=openai_key)
         prompt = (
             f"Professional YouTube thumbnail, exactly 16:9 aspect ratio. "
@@ -139,17 +140,26 @@ def _gen_dalle(context: str, output_path: str) -> bool:
             f"The image must fill the entire frame — no letterboxing, no black bars."
         )
         response = client.images.generate(
-            model="dall-e-3",
+            model="gpt-image-1",
             prompt=prompt[:4000],
-            size="1792x1024",   # 16:9 mais próximo disponível no DALL-E
-            quality="hd",
+            size="1536x1024",   # 16:9 nativo do gpt-image-1
+            quality="high",
             n=1,
         )
-        img_bytes = requests.get(response.data[0].url, timeout=30).content
-        return _save_resized(img_bytes, output_path)
+        # gpt-image-1 retorna base64 por padrão
+        b64_data = response.data[0].b64_json
+        if b64_data:
+            img_bytes = base64.b64decode(b64_data)
+            return _save_resized(img_bytes, output_path)
+        # Fallback: URL
+        if response.data[0].url:
+            img_bytes = requests.get(response.data[0].url, timeout=30).content
+            return _save_resized(img_bytes, output_path)
+        return False
     except Exception as e:
-        print(f"  {C.YELLOW}⚠ DALL-E falhou: {e}{C.RESET}")
+        print(f"  {C.YELLOW}⚠ gpt-image-1 falhou: {e}{C.RESET}")
     return False
+
 
 
 def _gen_gemini(context: str, output_path: str) -> bool:

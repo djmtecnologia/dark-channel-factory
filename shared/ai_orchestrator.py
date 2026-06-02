@@ -325,7 +325,7 @@ class AIOrchestrator:
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": max_tokens}
         }
         
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, timeout=120)  # 120s para scripts longos (36 cenas)
         if response.status_code == 429:
             raise Exception("Quota Exceeded")
         if response.status_code != 200:

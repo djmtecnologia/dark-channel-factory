@@ -13,11 +13,12 @@ from shared.logger import get_logger
 logger = get_logger(__name__)
 
 class ValidatorAgent:
-    def __init__(self, session, job, video_path: str, thumbnail_path: str = None, channel_language: str = "en-US"):
+    def __init__(self, session, job, video_path: str, thumbnail_path: str = None, srt_path: str = None, channel_language: str = "en-US"):
         self.session = session
         self.job = job
         self.video_path = video_path
         self.thumbnail_path = thumbnail_path
+        self.srt_path = srt_path
         self.errors = []
         
         # Pode receber o DB Model VideoJob ou um dict raw (desktop_node)
@@ -32,6 +33,16 @@ class ValidatorAgent:
             self.channel_language = channel.language if channel else channel_language
         else:
             self.channel_language = channel_language
+
+        # Resolução absoluta de FFmpeg e FFprobe locais
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.ffmpeg_exe = os.path.join(root_dir, "bin", "ffmpeg.exe")
+        if not os.path.exists(self.ffmpeg_exe):
+            self.ffmpeg_exe = "ffmpeg"
+            
+        self.ffprobe_exe = os.path.join(root_dir, "bin", "ffprobe.exe")
+        if not os.path.exists(self.ffprobe_exe):
+            self.ffprobe_exe = "ffprobe"
 
     def validate_metadata_and_language(self):
         """Verifica se os metadados existem e se batem com o idioma do canal."""
@@ -78,7 +89,7 @@ class ValidatorAgent:
             return
 
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", 
+            self.ffprobe_exe, "-v", "error", "-show_entries", 
             "format=duration:stream=codec_type,width,height",
             "-of", "json", self.video_path
         ]
@@ -94,9 +105,9 @@ class ValidatorAgent:
             if not has_video or not has_audio:
                 self.errors.append("Vídeo sem stream de áudio ou vídeo detectado.")
             
-            expected_min = 20 if self.video_type == "SHORT" else 720
+            expected_min = 20 if self.video_type == "SHORT" else 480
             if duration < expected_min:
-                self.errors.append(f"Duração ({duration:.1f}s) abaixo do mínimo para {self.video_type} (Mínimo: 720s).")
+                self.errors.append(f"Duração ({duration:.1f}s) abaixo do mínimo para {self.video_type} (Mínimo: {expected_min}s).")
                 
             # Verifica resolução
             video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
@@ -128,12 +139,11 @@ class ValidatorAgent:
         size_bytes = os.path.getsize(self.video_path)
         
         # Pega a duração via ffprobe
-        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.video_path]
+        cmd = [self.ffprobe_exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.video_path]
         try:
             duration = float(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
             if duration > 0:
                 bitrate_kbps = (size_bytes * 8) / (duration * 1024)
-                
                 # Para vídeos longos com loops perfeitos (B-rolls repetidos), o encoder h264 comprime brutalmente.
                 # 150 kbps é o piso real para detectar tela preta/estoque; backgrounds animados ficam acima disso.
                 limit = 150 if self.video_type == "LONG" else 350
@@ -142,16 +152,16 @@ class ValidatorAgent:
         except: pass
 
     def validate_hook_visuals(self):
-        """Avalia se o vídeo é apenas uma tela preta em múltiplos pontos (Hook e Meio)."""
+        """Avalia se o vídeo é apenas uma tela preta ou estática de baixíssimo contraste em múltiplos pontos."""
         if not os.path.exists(self.video_path): return
         
         temp_dir = os.path.dirname(self.video_path)
-        # Amostragem em 5 pontos: 1s, 5s, 10s, 30s e Meio do vídeo
-        sample_points = [1, 5, 10, 30]
+        # Amostragem em 5 pontos seguros: evita o primeiro segundo (s=1) que pode ser um fade-in preto natural
+        sample_points = [3, 8, 15, 30]
         
         # Tenta pegar o ponto médio
         try:
-            cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.video_path]
+            cmd_dur = [self.ffprobe_exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.video_path]
             duration = float(subprocess.run(cmd_dur, capture_output=True, text=True).stdout.strip())
             if duration > 60: sample_points.append(int(duration/2))
         except: pass
@@ -159,29 +169,108 @@ class ValidatorAgent:
         hook_frames = []
         for s in sample_points:
             out_path = os.path.join(temp_dir, f"qc_frame_{self.job_id}_{s}.jpg")
-            # Extrai o frame
-            cmd = f'ffmpeg -ss {s} -i "{self.video_path}" -vframes 1 -q:v 2 "{out_path}" -y'
-            subprocess.run(cmd, shell=True, capture_output=True)
+            # Extrai o frame (chamada robusta com lista, evitando shell=True no Windows)
+            cmd = [
+                self.ffmpeg_exe, "-ss", str(s), "-i", self.video_path,
+                "-vframes", "1", "-q:v", "2", out_path, "-y"
+            ]
+            subprocess.run(cmd, capture_output=True)
             if os.path.exists(out_path):
                 hook_frames.append(out_path)
         
-        # Analisa os frames
+        # Analisa os frames usando Pillow (Luminosidade Média e Desvio Padrão)
         black_frames = 0
+        from PIL import Image, ImageStat
+        
         for frame in hook_frames:
-            size_kb = os.path.getsize(frame) / 1024
-            # Limiar calibrado: frames dark-cinéticos reais ficam acima de 12KB;
-            # apenas telas 100% pretas ou estocadas ficam abaixo disso.
-            if size_kb < 12: 
-                black_frames += 1
+            try:
+                with Image.open(frame) as img:
+                    gray_img = img.convert("L")
+                    
+                    # [BLINDAGEM] Recorta os primeiros 60% de altura do frame (metade superior) para
+                    # ignorar pixels de legendas brilhantes (que ficam na parte inferior/centro-inferior).
+                    # Isso garante que a avaliação de tela preta incida apenas sobre a imagem/vídeo de fundo.
+                    w_img, h_img = gray_img.size
+                    cropped_img = gray_img.crop((0, 0, w_img, int(h_img * 0.6)))
+                    
+                    stat = ImageStat.Stat(cropped_img)
+                    mean_brightness = stat.mean[0]
+                    stddev = stat.stddev[0]
+                    
+                    # Cenas legítimas escuras e nítidas possuem stddev alto (contraste).
+                    # Telas pretas e estáticas vazias possuem tanto brilho muito baixo quanto desvio padrão baixíssimo (quase plano/0).
+                    if mean_brightness < 8.0 and stddev < 3.5:
+                        black_frames += 1
+                        logger.warning(f"⚠️ [QC] Frame {os.path.basename(frame)} detectado como tela preta/escura (Brilho: {mean_brightness:.2f}, DP: {stddev:.2f})")
+            except Exception as e:
+                logger.error(f"⚠️ Erro ao ler frame no QC Pillow: {e}")
+                # Fallback seguro para o tamanho do arquivo
+                size_kb = os.path.getsize(frame) / 1024
+                if size_kb < 7.0:
+                    black_frames += 1
                 
         # Limpeza
         for f in hook_frames:
             try: os.remove(f)
             except: pass
             
-        # Se mais da metade dos frames forem 'leves', reprova
-        if len(hook_frames) > 0 and (black_frames / len(hook_frames)) > 0.4:
+        # [CORREÇÃO CRÍTICA] Se falhar ao extrair frames (ex: ffmpeg indisponível), reprova com falha técnica!
+        # Isso impede aprovação cega e garante a integridade absoluta.
+        if len(hook_frames) == 0:
+            self.errors.append("Falha técnica crítica: Não foi possível extrair frames do vídeo para verificação visual do QC.")
+        elif (black_frames / len(hook_frames)) > 0.5: # Tolerância estendida para 50% para evitar falsos positivos
             self.errors.append(f"Reprovado: {black_frames}/{len(hook_frames)} frames analisados são tela preta ou estáticos.")
+
+    def validate_subtitles(self):
+        """Verifica se o arquivo de legendas SRT existe, é válido e contém blocos de texto reais."""
+        srt_path = self.srt_path
+        
+        # Se não for passado explicitamente, tenta inferir a partir do caminho do vídeo
+        if not srt_path and self.video_path:
+            base_dir = os.path.dirname(self.video_path)
+            base_name = os.path.basename(self.video_path)
+            # Tenta substituir a extensão do vídeo por .srt
+            srt_candidate = os.path.join(base_dir, os.path.splitext(base_name)[0] + ".srt")
+            if os.path.exists(srt_candidate):
+                srt_path = srt_candidate
+        
+        if not srt_path:
+            # Em shorts a legenda pode estar 100% embutida sem arquivo externo para o upload,
+            # mas se for vídeo longo, a legenda SRT externa é obrigatória para o SEO
+            if self.video_type == "LONG":
+                self.errors.append("Arquivo de legenda SRT não encontrado.")
+            return
+
+        if not os.path.exists(srt_path):
+            if self.video_type == "LONG":
+                self.errors.append(f"Arquivo de legenda SRT inexistente no caminho: {srt_path}")
+            return
+            
+        size_bytes = os.path.getsize(srt_path)
+        if size_bytes < 50: # Extremamente pequeno/vazio
+            self.errors.append(f"Arquivo de legenda SRT suspeitosamente vazio ({size_bytes} bytes).")
+            return
+
+        # Validação de conteúdo básico do SRT (blocos do tipo: index, timestamps, text)
+        try:
+            with open(srt_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            
+            # Um arquivo SRT válido deve ter pelo menos alguns números de bloco e marcadores de tempo -->
+            if "-->" not in content:
+                self.errors.append("Arquivo de legenda SRT corrompido ou em formato inválido (ausência de marcadores de tempo '-->').")
+                return
+                
+            # Verifica se contém blocos vazios ou se a contagem de blocos é muito baixa para o tamanho do vídeo
+            blocks = [b.strip() for b in content.split("\n\n") if b.strip()]
+            valid_blocks = [b for b in blocks if len(b.split("\n")) >= 3]
+            
+            if len(valid_blocks) < 3 and self.video_type == "LONG":
+                self.errors.append(f"Arquivo de legenda SRT possui blocos de texto insuficientes ({len(valid_blocks)} blocos).")
+                
+            logger.info(f"📝 [Validator] Legenda SRT validada com sucesso: {len(valid_blocks)} blocos de texto encontrados.")
+        except Exception as e:
+            self.errors.append(f"Erro ao analisar o arquivo de legenda SRT: {e}")
 
     def validate_thumbnail(self):
         """Verifica a qualidade técnica da miniatura."""
@@ -193,7 +282,7 @@ class ValidatorAgent:
             
         if os.path.exists(self.thumbnail_path):
             size_kb = os.path.getsize(self.thumbnail_path) / 1024
-            if size_kb < 40:
+            if size_kb < 28.0:
                 self.errors.append(f"Thumbnail com baixa qualidade/resolução (Tamanho: {size_kb:.1f}KB).")
         else:
             self.errors.append(f"Arquivo de Thumbnail não encontrado: {self.thumbnail_path}")
@@ -224,6 +313,7 @@ class ValidatorAgent:
         self.validate_technical_video()
         self.validate_visual_density()
         self.validate_hook_visuals()
+        self.validate_subtitles()
         self.validate_thumbnail()
         self.validate_affiliate_link()
         

@@ -1,4 +1,5 @@
 import os
+os.environ["DISABLE_XTTS"] = "1"
 import sys
 import time
 import asyncio
