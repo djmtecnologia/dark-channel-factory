@@ -47,29 +47,50 @@ Return ONLY valid JSON.
 """
 
 
-def run_content_validator_agent(script_data_dict: dict, save_db: bool = True, forward: bool = True) -> ContentValidationResult:
+def run_content_validator_agent(
+    script_data_dict: dict,
+    save_db: bool = True,
+    forward: bool = True,
+    profile: str | None = None,
+) -> ContentValidationResult:
     """
     Executa o Content Validator Agent.
 
     Args:
         script_data_dict: ScriptData serializado
+        save_db: Salva no banco de dados se True
+        forward: Envia para a próxima fila se True
+        profile: Nome do perfil de produção (ex: 'PILOT_5MIN', 'STANDARD_10MIN', etc)
     """
     from shared.models import ScriptData
+    from shared.production_profiles import resolve_profile, validate_script_word_count
 
     script_data = ScriptData(**script_data_dict)
     job_id = script_data.job_id
-    logger.info(f"🔍 [Validator] Checking script | job={job_id} | scenes={len(script_data.scenes)}")
+    
+    # Resolve perfil de produção (se configurado, senão fallback legado)
+    raw_profile = profile or script_data_dict.get("production_profile") or script_data_dict.get("profile")
+    resolved_profile = resolve_profile(profile_name=raw_profile)
+    profile_label = resolved_profile.name if resolved_profile else "LEGACY_LONG"
+    effective_min_words = resolved_profile.min_words if resolved_profile else MIN_WORD_COUNT
+
+    logger.info(f"🔍 [Validator] Checking script | job={job_id} | profile={profile_label} | scenes={len(script_data.scenes)}")
 
     # ── Step 1: Checks heurísticos ─────────────────────────────
     issues: list[str] = []
     suggestions: list[str] = []
 
-    # Contagem de palavras
+    # Contagem de palavras com validação centralizada
     all_text = " ".join(s.text for s in script_data.scenes)
     word_count = len(all_text.split())
 
-    if word_count < MIN_WORD_COUNT:
-        issues.append(f"Script too short: {word_count} words (minimum {MIN_WORD_COUNT})")
+    words_ok, words_err = validate_script_word_count(
+        word_count=word_count,
+        profile=resolved_profile,
+        validator_type="content"
+    )
+    if not words_ok and words_err:
+        issues.append(words_err)
 
     # Verifica hook
     has_strong_hook = _check_hook_strength(script_data.scenes[0].text if script_data.scenes else "")
@@ -164,7 +185,7 @@ Return JSON:
         originality_score >= VALIDATION_THRESHOLD_ORIGINALITY
         and narrative_quality_score >= VALIDATION_THRESHOLD_QUALITY
         and transformative_value_score >= VALIDATION_THRESHOLD_VALUE
-        and word_count >= MIN_WORD_COUNT
+        and word_count >= effective_min_words
         and not any("fail" in i.lower() or "prohibited" in i.lower() for i in all_issues)
     )
 

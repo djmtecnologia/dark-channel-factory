@@ -1,11 +1,11 @@
 import os
 import random
-from typing import List, Dict
+from typing import List, Dict, Optional
 from sqlmodel import Session, select
 from cloud_hub.models import VideoJob, Channel
 from shared.llm_client import get_completion # Vamos precisar mover o shared_v2
 
-async def run_scout_phase(session: Session, channel: Channel):
+async def run_scout_phase(session: Session, channel: Channel, production_profile: Optional[str] = None):
     """
     Simula a fase de Scout & Miner no Cloud.
     Encontra tópicos quentes no nicho do canal.
@@ -24,7 +24,8 @@ async def run_scout_phase(session: Session, channel: Channel):
     job = VideoJob(
         channel_id=channel.id,
         status="PENDING",  # BUG FIX: was 'SCOUTED' which the scheduler never picks up
-        topic=chosen_topic
+        topic=chosen_topic,
+        production_profile=production_profile
     )
     
     session.add(job)

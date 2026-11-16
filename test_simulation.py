@@ -2,75 +2,80 @@ import os
 import sys
 import asyncio
 import uuid
-from cloud_hub.core.copywriter import run_copywriter_phase
-from cloud_hub.models import VideoJob, Channel, Tenant
 from sqlmodel import Session, create_engine, SQLModel
 from desktop_node import (
     generate_voice_audio, 
-    get_media_with_cache, 
+    fetch_premium_broll, 
     generate_subtitles_locally, 
     assemble_production,
     ffmpeg_exe
 )
 
 async def simulate_video_generation():
-    print("🚀 [SIMULAÇÃO] Iniciando teste E2E das novas features...")
+    print("🚀 [SIMULAÇÃO] Iniciando teste E2E com Roteiro Mockado (Bypass LLM APIs)...")
     
-    # Setup de Banco em Memória para o Teste
-    engine = create_engine("sqlite:///:memory:")
-    SQLModel.metadata.create_all(engine)
+    job_id = "test_" + str(uuid.uuid4())[:8]
+    topic = "How AI is creating the new 1%"
     
-    with Session(engine) as session:
-        # Criar dados fake para o teste
-        tenant = Tenant(name="Test User", email="test@test.com")
-        session.add(tenant)
-        session.commit()
-        
-        channel = Channel(tenant_id=tenant.id, name="AI Test", niche="ai", language="en", market_region="USA")
-        session.add(channel)
-        session.commit()
-        
-        job = VideoJob(channel_id=channel.id, topic="How AI is creating the new 1%", status="PENDING")
-        session.add(job)
-        session.commit()
-
-        # 1. Teste do Copywriter Phase
-        print("📝 [1/5] Gerando Roteiro de Alta Retenção...")
-        job = await run_copywriter_phase(session, job)
-        script_full = job.script_data.get("script_full", "")
-        print(f"✅ Roteiro gerado: {len(script_full)} caracteres.")
-
-        job_id = f"test_{str(job.id)[:8]}"
-        
-        # 2. Teste do Motor de Áudio (1.10x)
-        print("🎙️ [2/5] Gerando Narração (Ritmo 1.10x)...")
-        audio_path = os.path.join("output", f"audio_{job_id}.mp3")
-        # Reduzimos o texto para o teste ser rápido
-        short_text = script_full[:200] if script_full else "This is a test narration for the AI wealth video simulation."
-    await generate_voice_audio(short_text, audio_path, "en-US-GuyNeural")
+    script_full = "Welcome to our story about how artificial intelligence is creating a new elite of billionaires. Today we explore the secrets of AI."
+    
+    # 2. Teste do Motor de Áudio (1.10x)
+    print("🎙️ [2/5] Gerando Narração (Ritmo 1.10x)...")
+    audio_path = os.path.join("output", f"audio_{job_id}.mp3")
+    await generate_voice_audio(script_full, audio_path, "en-US-GuyNeural")
     if os.path.exists(audio_path):
         print(f"✅ Áudio gerado: {os.path.getsize(audio_path)} bytes")
 
     # 3. Teste do Visual Scraper
     print("🌐 [3/5] Buscando Material Visual...")
-    video_clip = get_media_with_cache("artificial intelligence")
+    video_clip = fetch_premium_broll("artificial intelligence")
     if not video_clip:
         print("❌ Falha ao obter clipe visual. Verifique API Keys.")
         return
+    print(f"✅ Material visual obtido: {video_clip}")
 
     # 4. Teste de Legendas (Whisper)
     print("📝 [4/5] Transcrevendo com Whisper...")
     srt_path = generate_subtitles_locally(audio_path, job_id)
+    print(f"✅ Legendas geradas: {srt_path}")
     
     # 5. Teste de Renderização (Ken Burns + Audio Mix)
     print("🎬 [5/5] Renderizando com Ken Burns + Mixagem de Áudio...")
+    
+    clip_durations = [10.0]
+    
+    # Mock do job_data recebido pela render_video
+    job_data = {
+        "job_id": job_id,
+        "topic": topic,
+        "language": "en-US",
+        "niche": "AI Tools",
+        "is_short": False,
+        "script_data": {
+            "title": topic,
+            "script_full": script_full,
+            "scenes": [
+                {
+                    "id": 0,
+                    "timestamp": "0:00-0:10",
+                    "narration": script_full,
+                    "b_roll_visual": "artificial intelligence",
+                    "sfx_cue": "none",
+                    "visual_cues": []
+                }
+            ]
+        }
+    }
+    
     success = assemble_production(
         job_id=job_id,
         video_paths=[video_clip],
         audio_path=audio_path,
         srt_path=srt_path,
-        topic=job.topic,
-        clip_durations=[10.0] 
+        topic=topic,
+        clip_durations=clip_durations,
+        total_audio_sec=10.0,
+        job_data=job_data
     )
 
     if success:

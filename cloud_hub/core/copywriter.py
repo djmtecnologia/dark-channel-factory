@@ -442,9 +442,20 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
     # ───────────────────────────────────────────────────────
     # 2. BUILD PROMPT via Retention Engine
     # ───────────────────────────────────────────────────────
+    from shared.production_profiles import resolve_profile
+    profile_cfg = resolve_profile(job=job)
+
     current_date = datetime.now(timezone.utc).strftime("%B %Y")
-    is_short = job.video_type == "SHORT"
-    num_scenes = 5 if is_short else 36  # 36 cenas × ~22s = ~792s > 720s mínimo do QC
+    is_short = (job.video_type == "SHORT") or (profile_cfg.is_vertical if profile_cfg else False)
+    
+    if profile_cfg:
+        num_scenes = (profile_cfg.min_scenes + profile_cfg.max_scenes) // 2
+        min_target_words = profile_cfg.min_words
+        fallback_cutoff_words = int(profile_cfg.min_words * 0.85)
+    else:
+        num_scenes = 5 if is_short else 36  # 36 cenas × ~22s = ~792s > 720s mínimo do QC legado
+        min_target_words = 1500 if not is_short else 100
+        fallback_cutoff_words = 1000 if not is_short else 80
 
     system_prompt, prompt = build_retention_prompt(
         topic=job.topic,
@@ -463,10 +474,11 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
     
     # FinOps: Adicionar reforço rígido de densidade no prompt inicial para que a LLM acerte de primeira
     if not is_short:
+        words_per_scene = max(40, min_target_words // num_scenes)
         prompt += (
             f"\n\nCRITICAL DENSITY REQUIREMENT (FinOps Cost Saving): You MUST generate exactly {num_scenes} scenes. "
-            f"Each scene's narration MUST contain between 60 and 75 words of highly detailed, descriptive, non-generic business documentary narrative. "
-            f"Do not write short summaries or lazy descriptions. Target total word count: {num_scenes * 65} words (minimum 1500 words)."
+            f"Each scene's narration MUST contain approximately {words_per_scene} words of highly detailed, descriptive, non-generic business documentary narrative. "
+            f"Do not write short summaries or lazy descriptions. Target total word count: {min_target_words} words."
         )
     
     # ───────────────────────────────────────────────────────
@@ -502,7 +514,8 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
             # ── Validator: remove duplicates BEFORE density check ──
             validation_result = None
             if not is_short:
-                script_data, validation_result = validate_and_fix_script(script_data, is_short=False)
+                profile_arg = profile_cfg.name if profile_cfg else None
+                script_data, validation_result = validate_and_fix_script(script_data, is_short=False, profile=profile_arg)
                 # Re-count after deduplication
                 scenes_clean = script_data.get("scenes", [])
                 total_text = " ".join(
@@ -513,14 +526,14 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
 
             # Density gate
             if not is_short:
-                # Se bater o threshold de 1500 ou se for a última tentativa e tiver mais de 1000 palavras, aceitamos para salvar custos
+                # Se bater o threshold exigido pelo perfil ou se for a última tentativa e tiver mais que o piso seguro, aceitamos
                 is_last_attempt = (attempt == MAX_ATTEMPTS - 1)
-                if word_count >= 1500:
+                if word_count >= min_target_words:
                     print(f"✅ Script perfeitamente validado com densidade máxima: {word_count} palavras | Duplicatas: {len(validation_result.scenes_removed) if validation_result else 0} removidas")
                     if validation_result and not validation_result.strong_hook:
                         print("⚠️ HOOK FRACO detectado pelo Validator. Considere regenerar.")
                     break
-                elif is_last_attempt and word_count >= 1000:
+                elif is_last_attempt and word_count >= fallback_cutoff_words:
                     print(f"⚠️ [FinOps] Script de {word_count} palavras aceito no limite de segurança de retentativas para evitar faturamento redundante da LLM.")
                     break
                 else:
@@ -529,8 +542,7 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                         prompt += (
                             f"\n\nCRITICAL: Only {word_count} words generated in previous attempt. "
                             f"You MUST write EXACTLY {num_scenes} scenes. "
-                            f"Each scene MUST have 60-75 words of narration. "
-                            f"Target: {num_scenes} scenes × 65 words = ~{num_scenes*65} words total."
+                            f"Target: minimum {min_target_words} words total."
                         )
             else:
                 break # Shorts não precisam de validação de densidade longa
@@ -645,6 +657,18 @@ async def run_copywriter_phase(session: Session, job: VideoJob):
                 "generated_at": str(datetime.now(timezone.utc))
             })
     
+    # 3.5 Integração controlada do AI Video Director (legacy por padrão)
+    # Na Tarefa 3 (Observabilidade), `director_observability` é emitido e
+    # correlacionado via `correlation_id` sem mutar `job.script_data`.
+    from cloud_hub.core.video_director_integration import integrate_video_director
+    from cloud_hub.core.video_director_observability import generate_correlation_id
+    correlation_id = generate_correlation_id(prefix=f"job-{getattr(job, 'id', 'unknown')}")
+    director_observability = integrate_video_director(
+        job=job,
+        tenant_id=channel.tenant_id,
+        correlation_id=correlation_id,
+    )
+
     # 4. Se o tenant tem auto_approve, já manda pro Worker
     tenant = session.get(Tenant, channel.tenant_id)
     if tenant and tenant.auto_approve_content:

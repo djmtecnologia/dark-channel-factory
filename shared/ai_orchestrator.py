@@ -34,6 +34,8 @@ class AIOrchestrator:
             "openrouter": {"active": True, "last_failure": 0},
             "deepseek": {"active": True, "last_failure": 0},
             "mistral": {"active": True, "last_failure": 0},
+            # Modelos locais via Ollama — zero custo, zero latência de rede
+            "ollama": {"active": True, "last_failure": 0},
         }
         self.circuit_break_time = 300  # 5 minutos de cooldown após erro grave
 
@@ -42,6 +44,16 @@ class AIOrchestrator:
         self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
         self.openai_model = os.getenv("LLM_FINAL_FALLBACK_MODEL", "gpt-4o-mini").strip()
         self.or_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku").strip()
+
+        # ─── Configuração dos Modelos Locais Ollama ───────────────────
+        # qwen2.5-coder → programação / estruturas de dados / lógica de alto nível
+        # llava          → visão computacional / análise de imagens
+        # gemma2         → geração de vídeo / narrativas / roteiros
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        self.ollama_model_code    = os.getenv("OLLAMA_MODEL_CODE",   "qwen2.5-coder").strip()
+        self.ollama_model_vision  = os.getenv("OLLAMA_MODEL_VISION", "llava").strip()
+        self.ollama_model_video   = os.getenv("OLLAMA_MODEL_VIDEO",  "gemma2").strip()
+        self.ollama_model_general = os.getenv("OLLAMA_MODEL_GENERAL", "qwen2.5-coder").strip()
 
         # Inicialização dos Clientes
         self._init_clients()
@@ -172,7 +184,15 @@ class AIOrchestrator:
         
         return text
 
-    def chat_completion(self, system_prompt: str, user_prompt: str, json_mode: bool = False, max_tokens: int = 8192) -> LLMResponse:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        json_mode: bool = False,
+        max_tokens: int = 8192,
+        task_type: str = "general",  # "general" | "code" | "vision" | "video"
+        timeout: float | None = None,
+    ) -> LLMResponse:
         """
         Executa a chamada LLM com fallback automático seguindo a Tier List e Cache de Custo-Zero.
         """
@@ -203,7 +223,7 @@ class AIOrchestrator:
         GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
         if self._is_provider_available("gemini") and self.gemini_key:
             try:
-                resp = self._call_gemini(self.primary_model, system_prompt, user_prompt, json_mode, max_tokens)
+                resp = self._call_gemini(self.primary_model, system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout)
                 if json_mode: resp.text = self._clean_json(resp.text)
                 save_to_cache(resp.text)
                 return resp
@@ -213,7 +233,7 @@ class AIOrchestrator:
                 if ("404" in err_str or "not found" in err_str) and self.primary_model != GEMINI_FALLBACK_MODEL:
                     logger.warning(f"⚠️ Gemini model '{self.primary_model}' returned 404. Trying fallback '{GEMINI_FALLBACK_MODEL}'...")
                     try:
-                        resp = self._call_gemini(GEMINI_FALLBACK_MODEL, system_prompt, user_prompt, json_mode, max_tokens)
+                        resp = self._call_gemini(GEMINI_FALLBACK_MODEL, system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout)
                         if json_mode: resp.text = self._clean_json(resp.text)
                         save_to_cache(resp.text)
                         return resp
@@ -232,7 +252,7 @@ class AIOrchestrator:
         if self._is_provider_available("groq") and self.groq_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.groq_client, self.groq_model, "Groq", system_prompt, user_prompt, json_mode, groq_max_tokens
+                    self.groq_client, self.groq_model, "Groq", system_prompt, user_prompt, json_mode, groq_max_tokens, timeout=timeout
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
                 save_to_cache(resp.text)
@@ -244,7 +264,7 @@ class AIOrchestrator:
                     logger.warning("⚠️ Groq 413: Payload muito grande. Tentando com llama-3.1-8b-instant...")
                     try:
                         resp = self._call_openai_compatible(
-                            self.groq_client, "llama-3.1-8b-instant", "Groq-8B", system_prompt, user_prompt, json_mode, 4000
+                            self.groq_client, "llama-3.1-8b-instant", "Groq-8B", system_prompt, user_prompt, json_mode, 4000, timeout=timeout
                         )
                         if json_mode: resp.text = self._clean_json(resp.text)
                         save_to_cache(resp.text)
@@ -261,7 +281,7 @@ class AIOrchestrator:
         if self._is_provider_available("openai") and self.openai_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.openai_client, self.openai_model, "OpenAI", system_prompt, user_prompt, json_mode, max_tokens
+                    self.openai_client, self.openai_model, "OpenAI", system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
                 save_to_cache(resp.text)
@@ -277,7 +297,7 @@ class AIOrchestrator:
         if self._is_provider_available("openrouter") and self.or_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.or_client, self.or_model, "OpenRouter", system_prompt, user_prompt, json_mode, max_tokens
+                    self.or_client, self.or_model, "OpenRouter", system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
                 save_to_cache(resp.text)
@@ -290,7 +310,7 @@ class AIOrchestrator:
         if self._is_provider_available("deepseek") and self.deepseek_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.deepseek_client, "deepseek-chat", "DeepSeek", system_prompt, user_prompt, json_mode, max_tokens
+                    self.deepseek_client, "deepseek-chat", "DeepSeek", system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
                 save_to_cache(resp.text)
@@ -299,11 +319,11 @@ class AIOrchestrator:
                 is_quota = "402" in str(e) or "Insufficient Balance" in str(e)
                 self._mark_failure("deepseek", str(e), is_quota=is_quota)
 
-        # TIER 5: Mistral (Final Fallback)
+        # TIER 5: Mistral (Final Fallback remoto)
         if self._is_provider_available("mistral") and self.mistral_client:
             try:
                 resp = self._call_openai_compatible(
-                    self.mistral_client, "mistral-small-latest", "MistralAI", system_prompt, user_prompt, json_mode, max_tokens
+                    self.mistral_client, "mistral-small-latest", "MistralAI", system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout
                 )
                 if json_mode: resp.text = self._clean_json(resp.text)
                 return resp
@@ -311,9 +331,64 @@ class AIOrchestrator:
                 is_quota = "429" in str(e) or "402" in str(e)
                 self._mark_failure("mistral", str(e), is_quota=is_quota)
 
+        # TIER 6: Modelos Locais Ollama (zero custo, zero rede) ─────────────────
+        # Seleciona o modelo local ideal conforme o tipo de tarefa:
+        #   code   → qwen2.5-coder  (programação de alto nível)
+        #   vision → llava          (visão computacional / análise de imagens)
+        #   video  → gemma2         (geração de vídeo / roteiros)
+        #   *      → qwen2.5-coder  (geral)
+        if self._is_provider_available("ollama"):
+            _task_map = {
+                "code":    self.ollama_model_code,
+                "vision":  self.ollama_model_vision,
+                "video":   self.ollama_model_video,
+            }
+            local_model = _task_map.get(task_type, self.ollama_model_general)
+            try:
+                resp = self._call_ollama(local_model, system_prompt, user_prompt, json_mode, max_tokens, timeout=timeout)
+                if json_mode: resp.text = self._clean_json(resp.text)
+                save_to_cache(resp.text)
+                return resp
+            except Exception as e:
+                self._mark_failure("ollama", str(e))
+
         raise RuntimeError("CRITICAL ERROR: Todos os provedores de LLM falharam ou estão offline.")
 
-    def _call_gemini(self, model: str, system: str, user: str, json_mode: bool, max_tokens: int) -> LLMResponse:
+    def _call_ollama(self, model: str, system: str, user: str, json_mode: bool, max_tokens: int, timeout: float | None = None) -> LLMResponse:
+        """Chama o servidor Ollama local via REST. Suporta qwen2.5-coder, llava e gemma2."""
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            "stream": False,
+            "keep_alive": "10m",
+            "options": {
+                "temperature": 0.7,
+                "num_ctx":     int(os.getenv("OLLAMA_NUM_CTX", "8192")),
+                "num_predict": min(max_tokens, 8192),
+                "num_thread":  int(os.getenv("OLLAMA_NUM_THREAD", "4")),
+            },
+        }
+        if json_mode:
+            payload["format"] = "json"
+
+        req_timeout = timeout if timeout is not None else int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+        try:
+            response = requests.post(
+                f"{self.ollama_base_url}/api/chat",
+                json=payload,
+                timeout=req_timeout,
+            )
+            response.raise_for_status()
+            text = response.json().get("message", {}).get("content", "")
+            logger.info(f"✅ Ollama Local Success: {model} (task-routed)")
+            return LLMResponse(text, "Ollama", model, 0)
+        except Exception as exc:
+            raise RuntimeError(f"Ollama [{model}] falhou: {exc}") from exc
+
+    def _call_gemini(self, model: str, system: str, user: str, json_mode: bool, max_tokens: int, timeout: float | None = None) -> LLMResponse:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_key}"
         
         full_prompt = f"SYSTEM: {system}\n\nUSER: {user}"
@@ -325,7 +400,8 @@ class AIOrchestrator:
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": max_tokens}
         }
         
-        response = requests.post(url, json=payload, timeout=120)  # 120s para scripts longos (36 cenas)
+        req_timeout = timeout if timeout is not None else 120
+        response = requests.post(url, json=payload, timeout=req_timeout)  # 120s para scripts longos (36 cenas)
         if response.status_code == 429:
             raise Exception("Quota Exceeded")
         if response.status_code != 200:
@@ -338,7 +414,7 @@ class AIOrchestrator:
         logger.info(f"✅ Gemini Success: {model}")
         return LLMResponse(text, "Gemini", model, tokens)
 
-    def _call_openai_compatible(self, client: OpenAI, model: str, provider: str, system: str, user: str, json_mode: bool, max_tokens: int) -> LLMResponse:
+    def _call_openai_compatible(self, client: OpenAI, model: str, provider: str, system: str, user: str, json_mode: bool, max_tokens: int, timeout: float | None = None) -> LLMResponse:
         kwargs = {
             "model": model,
             "messages": [
@@ -347,7 +423,7 @@ class AIOrchestrator:
             ],
             "temperature": 0.7,
             "max_tokens": max_tokens,
-            "timeout": 90,  # 90s timeout to prevent hung requests
+            "timeout": timeout if timeout is not None else 90,  # 90s default timeout
         }
         if json_mode:
             kwargs["messages"][0]["content"] += "\nReturn ONLY JSON."

@@ -15,7 +15,7 @@ from agents.video_editor.subtitle_generator import (
     generate_hormozi_subtitles,
     get_audio_duration,
 )
-from agents.video_editor.tts_engine import generate_full_narration
+from agents.video_editor.tts_engine import generate_full_narration, get_voice_for_language
 from agents.video_editor.video_assembler import assemble_video
 from orchestrator.config import get_channel, get_default_channel
 from orchestrator.queue_manager import QUEUE_UPLOAD, get_queue_manager
@@ -45,15 +45,16 @@ def run_video_editor_agent(script_data_dict: dict) -> VideoData:
     job_id = script_data.job_id
     logger.info(f"🎬 [VideoEditor] Starting | job={job_id} | scenes={len(script_data.scenes)}")
 
-    channel = get_channel(script_data.niche_data.channel_id) or get_default_channel()
+    channel = get_channel(script_data.target_channel_id or script_data.niche_data.channel_id) or get_default_channel()
     scenes_dicts = [s.model_dump(mode="json") for s in script_data.scenes]
+    voice = get_voice_for_language(script_data.language)
 
     # ── Step 1: Gerar Narração TTS ─────────────────────────────
     logger.info("🎤 [VideoEditor] Generating TTS narration...")
     audio_paths = generate_full_narration(
         scenes=scenes_dicts,
         job_id=job_id,
-        voice=channel.voice,
+        voice=voice,
         rate=channel.tts_rate,
     )
 
@@ -69,7 +70,14 @@ def run_video_editor_agent(script_data_dict: dict) -> VideoData:
 
     # ── Step 3: Baixar B-roll ──────────────────────────────────
     logger.info("📹 [VideoEditor] Fetching B-roll clips...")
-    broll_paths = fetch_all_broll(scenes_dicts, job_id)
+    # Todas as localizações apontam para o mesmo diretório de ativos brutos.
+    broll_job_id = script_data.source_job_id or job_id
+    import redis
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    with redis.from_url(redis_url).lock(
+        f"broll-lock:{broll_job_id}", timeout=3600, blocking_timeout=3600
+    ):
+        broll_paths = fetch_all_broll(scenes_dicts, broll_job_id)
 
     # ── Step 4: Gerar Legendas ─────────────────────────────────
     subtitle_path = str(job_audio_path(job_id) / "subtitles.srt")
@@ -88,6 +96,7 @@ def run_video_editor_agent(script_data_dict: dict) -> VideoData:
         broll_paths=broll_paths,
         subtitle_path=subtitle_path,
         job_id=job_id,
+        output_filename=f"{job_id}_{script_data.language}_final.mp4",
     )
 
     # ── Step 6: Limpar arquivos temporários ───────────────────

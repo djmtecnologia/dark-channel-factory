@@ -9,11 +9,12 @@ import subprocess
 from sqlmodel import Session
 from cloud_hub.models import VideoJob, Channel
 from shared.logger import get_logger
+from shared.production_profiles import resolve_profile, validate_duration, ProductionProfileConfig
 
 logger = get_logger(__name__)
 
 class ValidatorAgent:
-    def __init__(self, session, job, video_path: str, thumbnail_path: str = None, srt_path: str = None, channel_language: str = "en-US"):
+    def __init__(self, session, job, video_path: str, thumbnail_path: str = None, srt_path: str = None, channel_language: str = "en-US", production_profile: str = None):
         self.session = session
         self.job = job
         self.video_path = video_path
@@ -27,6 +28,19 @@ class ValidatorAgent:
         self.script_data = job.script_data if hasattr(job, 'script_data') else job.get('script_data', {})
         self.video_type = job.video_type if hasattr(job, 'video_type') else (job.get('video_type') or job.get('type') or 'LONG')
         self.affiliate_url = job.injected_affiliate_url if hasattr(job, 'injected_affiliate_url') else job.get('injected_affiliate_url')
+        
+        # Production profile resolution
+        raw_profile = (
+            production_profile
+            or getattr(job, 'production_profile', None)
+            or (job.get('production_profile') if isinstance(job, dict) else None)
+            or (job.get('profile') if isinstance(job, dict) else None)
+        )
+        self.production_profile = str(raw_profile).strip() if raw_profile else None
+        self.resolved_profile: ProductionProfileConfig | None = resolve_profile(
+            job=job,
+            profile_name=self.production_profile
+        )
         
         if self.session and hasattr(job, 'channel_id'):
             channel = self.session.get(Channel, job.channel_id)
@@ -105,25 +119,32 @@ class ValidatorAgent:
             if not has_video or not has_audio:
                 self.errors.append("Vídeo sem stream de áudio ou vídeo detectado.")
             
-            expected_min = 20 if self.video_type == "SHORT" else 480
-            if duration < expected_min:
-                self.errors.append(f"Duração ({duration:.1f}s) abaixo do mínimo para {self.video_type} (Mínimo: {expected_min}s).")
+            # Validação centralizada de duração via Production Profile
+            duration_ok, duration_err = validate_duration(
+                duration_s=duration,
+                profile=self.resolved_profile,
+                video_type=self.video_type
+            )
+            if not duration_ok and duration_err:
+                self.errors.append(duration_err)
                 
             # Verifica resolução
             video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
             if video_stream:
                 w, h = int(video_stream.get("width", 0)), int(video_stream.get("height", 0))
-                # Detecção flexível: LONG deve ser horizontal, SHORT deve ser vertical
-                if self.video_type == "LONG":
-                    if w < h: # Invertido!
-                         self.errors.append(f"Resolução errada para LONG: {w}x{h} (Deveria ser Horizontal).")
-                    elif w < 1280 or h < 720:
-                         self.errors.append(f"Resolução muito baixa para LONG: {w}x{h}.")
-                elif self.video_type == "SHORT":
-                    if w > h: # Invertido!
-                         self.errors.append(f"Resolução errada para SHORT: {w}x{h} (Deveria ser Vertical).")
+                is_vert = self.resolved_profile.is_vertical if self.resolved_profile else (self.video_type == "SHORT")
+                profile_lbl = self.resolved_profile.name if self.resolved_profile else self.video_type
+
+                if is_vert:
+                    if w > h:
+                        self.errors.append(f"Resolução errada para {profile_lbl}: {w}x{h} (Deveria ser Vertical).")
                     elif w < 720 or h < 1280:
-                         self.errors.append(f"Resolução muito baixa para SHORT: {w}x{h}.")
+                        self.errors.append(f"Resolução muito baixa para {profile_lbl}: {w}x{h}.")
+                else:
+                    if w < h:
+                        self.errors.append(f"Resolução errada para {profile_lbl}: {w}x{h} (Deveria ser Horizontal).")
+                    elif w < 1280 or h < 720:
+                        self.errors.append(f"Resolução muito baixa para {profile_lbl}: {w}x{h}.")
 
         except Exception as e:
             self.errors.append(f"Falha ao executar FFprobe: {e}")

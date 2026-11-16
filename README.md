@@ -15,12 +15,12 @@ APScheduler (Ter/Qui/Sáb 14:00 UTC)
     ├─► Scout & Miner Agent    → Minera nicho + trending (pytrends + YouTube API)
     │       │
     │       ▼
-    ├─► Copywriter Agent       → Roteiro + SEO + Afiliados (Gemini 2.5 Flash)
-    │       │
-    │   ┌───┴───┐
-    │   ▼       ▼
-    ├─► Video Editor           ├─► Designer Agent
-    │   (edge-tts + FFmpeg)    │   (DALL-E 3 Thumbnails)
+18:     ├─► Copywriter Agent       → Roteiro + SEO + Afiliados (Ollama Local)
+19:     │       │
+20:     │   ┌───┴───┐
+21:     │   ▼       ▼
+22:     ├─► Video Editor           ├─► Designer Agent
+23:     │   (edge-tts + FFmpeg)    │   (Hugging Face / Pillow)
     │       │                  │
     │       └──────┬───────────┘
     │              ▼
@@ -79,11 +79,27 @@ notepad .env  # Windows
 
 | Chave | Obrigatória | Onde obter |
 |-------|-------------|------------|
-| `GEMINI_API_KEY` | ✅ Sim | [Google AI Studio](https://aistudio.google.com) |
+| `HF_TOKEN` | ⚡ Recomendado (Thumbnails) | [Hugging Face](https://huggingface.co/settings/tokens) |
 | `YOUTUBE_CLIENT_SECRETS_FILE` | ✅ Sim | [Google Cloud Console](https://console.cloud.google.com) |
 | `PEXELS_API_KEY` | ✅ Sim (vídeos) | [Pexels API](https://www.pexels.com/api/) |
-| `OPENAI_API_KEY` | ⚡ Fallback LLM + Thumbnails | [OpenAI](https://platform.openai.com) |
 | `YOUTUBE_API_KEY` | ℹ️ Opcional | [Google Cloud Console](https://console.cloud.google.com) |
+
+### IA local com Ollama (Windows, CPU-only)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_ollama.ps1
+ollama list
+curl.exe http://localhost:11434/api/tags
+```
+
+O Copywriter cria um roteiro matriz e depois localiza o conteúdo para `en-US`,
+`de-DE`, `es-ES` e `fr-FR`. Os quatro jobs conservam IDs, ordem e buscas visuais das cenas;
+o Video Editor baixa um único conjunto de B-rolls e gera quatro áudios, legendas
+e MP4s independentes.
+
+Para thumbnails, crie um token com permissão **Inference Providers** na Hugging
+Face e preencha `HF_TOKEN` no `.env`. Sem token ou cota, o fallback Pillow ainda
+gera as três variantes localmente.
 
 ### 4. Autenticação YouTube (UMA VEZ)
 
@@ -173,9 +189,9 @@ dark-channel-factory/
 ├── 🌐 cloud_hub/                # Dashboard SaaS e Gestão Multi-Canal
 │   └── main.py                  # Entry point da interface web e API
 ├── 🤖 agents/                   # Inteligência dos Agentes
-│   ├── designer/                # Geração de Thumbnails (DALL-E 3 / Pollinations)
+│   ├── designer/                # Geração de Thumbnails (Hugging Face / Pillow)
 │   ├── video_editor/            # Motor de edição (FFmpeg + edge-tts)
-│   ├── copywriter/              # Roteirização e SEO (Gemini/OpenAI)
+│   ├── copywriter/              # Roteirização e SEO (Ollama Local)
 │   └── scout_miner/             # Mineração de tendências e nichos
 ├── 📋 orchestrator/             # Lógica de Orquestração e Filas
 ├── 🗄️ database/                 # Camada de Dados (SQLModel / Postgres)
@@ -214,15 +230,15 @@ dark-channel-factory/
 
 ### Agent 1: Scout & Miner
 - **Input:** Configuração do canal
-- **Processo:** pytrends + YouTube Data API → Gemini 2.5 Flash análise
+- **Processo:** pytrends + YouTube Data API → Ollama análise local
 - **Output:** `NicheData` com tópico, keywords, ângulo, score
-- **Custo:** Gratuito (pytrends + 1 chamada LLM)
+- **Custo:** Gratuito (pytrends + Ollama local)
 
 ### Agent 2: Copywriter
 - **Input:** `NicheData`
-- **Processo:** Gemini gera roteiro completo (Hook→CTA), seleciona afiliados
+- **Processo:** Ollama local gera roteiro completo (Hook→CTA), seleciona afiliados
 - **Output:** `ScriptData` com 12 cenas, título, descrição, tags
-- **Custo:** ~1-2 chamadas LLM (6000 tokens)
+- **Custo:** Gratuito (Local LLM)
 
 ### Agent 3: Video Editor
 - **Input:** `ScriptData`
@@ -232,9 +248,9 @@ dark-channel-factory/
 
 ### Agent 4: Designer
 - **Input:** `ScriptData` (thumbnail brief)
-- **Processo:** Gemini gera prompts → DALL-E 3 gera imagens
+- **Processo:** Hugging Face Inference API / Pillow local gera imagens
 - **Output:** 3x thumbnails `.png` (A/B/C)
-- **Custo:** ~$0.12 (3x DALL-E 3 HD) — Fallback Pillow = grátis
+- **Custo:** Gratuito
 
 ### Agent 5: Manager & Analyst
 - **Input:** `VideoData` + `ThumbnailData`

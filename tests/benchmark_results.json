@@ -1,0 +1,54 @@
+{
+  "duration_tested_s": 5.0,
+  "qsv_supported": true,
+  "results": [
+    {
+      "resolution": "1280x720",
+      "encoder": "libx264",
+      "success": true,
+      "render_time_s": 0.82,
+      "file_size_mb": 0.09,
+      "bitrate_kbps": 141.7,
+      "avg_cpu_percent": 147.0,
+      "peak_cpu_percent": 309.0,
+      "peak_ram_mb": 94.1,
+      "fps_speed": 6.1
+    },
+    {
+      "resolution": "1920x1080",
+      "encoder": "libx264",
+      "success": true,
+      "render_time_s": 1.13,
+      "file_size_mb": 0.09,
+      "bitrate_kbps": 147.0,
+      "avg_cpu_percent": 223.3,
+      "peak_cpu_percent": 434.1,
+      "peak_ram_mb": 175.6,
+      "fps_speed": 4.42
+    },
+    {
+      "resolution": "1280x720",
+      "encoder": "h264_qsv",
+      "success": true,
+      "render_time_s": 2.06,
+      "file_size_mb": 0.09,
+      "bitrate_kbps": 145.6,
+      "avg_cpu_percent": 131.5,
+      "peak_cpu_percent": 216.3,
+      "peak_ram_mb": 96.7,
+      "fps_speed": 2.43
+    },
+    {
+      "resolution": "1920x1080",
+      "encoder": "h264_qsv",
+      "success": true,
+      "render_time_s": 1.22,
+      "file_size_mb": 0.09,
+      "bitrate_kbps": 152.0,
+      "avg_cpu_percent": 146.5,
+      "peak_cpu_percent": 248.4,
+      "peak_ram_mb": 135.8,
+      "fps_speed": 4.11
+    }
+  ]
+}

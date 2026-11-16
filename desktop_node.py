@@ -1926,8 +1926,14 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
                     "-aspect", "9:16", "-t", "59", "-c:a", "copy", out_short, "-y"
                 ]
             
-            res_shorts = subprocess.run(to_relative_args(args_shorts), shell=False)
-            if res_shorts.returncode != 0:
+            try:
+                res_shorts = subprocess.run(to_relative_args(args_shorts), shell=False, timeout=120)
+                failed = res_shorts.returncode != 0
+            except subprocess.TimeoutExpired:
+                print(f"⏳ [TIMEOUT] Shorts {i} render timed out (QSV hang). Forcing CPU fallback...")
+                failed = True
+                
+            if failed:
                 print(f"❌ [FFMPEG ERROR] Falha no Shorts {i}.")
                 # Se falhar usando o encoder configurado, tenta um último fallback de emergência usando libx264 ultrafast
                 if encoder != "libx264":
@@ -1949,14 +1955,18 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
                             args_shorts_cpu[idx_px_sh+1] = "yuv420p"
                         else:
                             args_shorts_cpu.insert(idx_cv_sh+4, "-pix_fmt")
-                            args_shorts_cpu[idx_cv_sh+5] = "yuv420p"
+                            args_shorts_cpu.insert(idx_cv_sh+5, "yuv420p"
+                            )
                     except Exception as e:
                         print(f"⚠️ [Short Fallback Index Error] {e}")
                         
-                    res_shorts = subprocess.run(to_relative_args(args_shorts_cpu), shell=False)
-                    if res_shorts.returncode == 0:
-                        print(f"✅ Short {i} recuperado via software fallback!")
-                        continue
+                    try:
+                        res_shorts = subprocess.run(to_relative_args(args_shorts_cpu), shell=False, timeout=120)
+                        if res_shorts.returncode == 0:
+                            print(f"✅ Short {i} recuperado via software fallback!")
+                            continue
+                    except subprocess.TimeoutExpired:
+                        print(f"❌ [TIMEOUT] CPU fallback timed out too.")
                 cleanup(); return False
 
         # Gravar legendas finais de vídeo longo no output_long real a partir do clean
@@ -2060,7 +2070,10 @@ def render_video(job_data):
 
         cenas = []
         clip_durations = []
-        scenes_list = script_obj.get("scenes", [])
+        
+        # Normalização universal do contrato de cenas (suporta b_roll_visual, b_roll_query, narration, text)
+        from shared.scene_normalizer import normalize_scenes
+        scenes_list = normalize_scenes(script_obj.get("scenes", []), fallback_topic=topic)
         
         # Extract per-scene visual_cues from Retention Engine output for micro-pacing
         scene_visual_cues = []
@@ -2094,15 +2107,20 @@ def render_video(job_data):
         print(f"🎬 [Worker] Sincronizando {len(scenes_list)} cenas...")
         if len(scenes_list) == 0:
             print("⚠️ Nenhuma cena encontrada no roteiro. Criando cena padrão...")
-            scenes_list = [{"timestamp": "0:00-0:10", "narration": script_text[:500], "b_roll_visual": topic}]
+            scenes_list = [{"timestamp": "0:00-0:10", "narration": script_text[:500], "b_roll_visual": topic, "b_roll_query": topic}]
 
         assigned_paths = []
         used_assets = set()
         
         def download_assets(scene, scene_index=0):
-            visual_kw = scene.get("b_roll_visual", "AI technology")
+            # Prioridade de B-roll: 1. b_roll_visual, 2. b_roll_query, 3. fallback topic. Nunca 'AI technology' silencioso.
+            visual_kw = (
+                scene.get("b_roll_visual")
+                or scene.get("b_roll_query")
+                or (topic if topic else "cinematic documentary background")
+            )
             sfx_cue = scene.get("sfx_cue", "none")
-            scene_text = scene.get("narration", "")
+            scene_text = scene.get("narration") or scene.get("text", "")
             
             # ─── 1. HOOK QUALITY ENGINE: Cena 0 ultra impactante ───
             if scene_index == 0:
@@ -2496,7 +2514,8 @@ def render_video(job_data):
             video_path=check_path, 
             thumbnail_path=thumb_path,
             srt_path=final_srt_path if job_data.get("type") != "SHORT" else None,
-            channel_language=job_data.get("language", "en-US")
+            channel_language=job_data.get("language", "en-US"),
+            production_profile=job_data.get("production_profile")
         )
         if not validator.execute_quality_control():
             print("❌ [Worker] Vídeo REPROVADO no controle de qualidade. Abortando upload.")

@@ -69,6 +69,8 @@ class VideoJob(SQLModel, table=True):
     
     # BUG FIX: video_type was used in global_scheduler but never defined in model
     video_type: str = Field(default="LONG", index=True)  # "LONG" or "SHORT"
+    production_profile: Optional[str] = Field(default=None, index=True)  # "PILOT_5MIN", "STANDARD_10MIN", "DOCUMENTARY_20MIN", "SHORTS"
+    video_director_mode: Optional[str] = Field(default=None, index=True)  # "legacy" | "director" | None (inherits env/default)
     # Store the final YouTube URL after publishing for analytics and deep links
     published_url: Optional[str] = Field(default=None)
     

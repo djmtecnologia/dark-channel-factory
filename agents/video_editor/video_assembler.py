@@ -5,6 +5,7 @@ Pipeline FFmpeg para montar vídeo final: B-roll + Narração + Legendas + Músi
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -108,6 +109,8 @@ def _prepare_broll_clip(
     if not input_path or not Path(input_path).exists():
         return _create_background_color_video(duration_s, output_path, fallback_color)
 
+    is_image = input_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
+
     # Aplica efeito Visual Profissional: Zoom Suave (Ken Burns)
     # Isso faz o vídeo parecer mais dinâmico
     vf_chain = [
@@ -118,8 +121,11 @@ def _prepare_broll_clip(
         f"zoompan=z='min(zoom+0.001,1.1)':d={int(duration_s * VIDEO_FPS)}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
     ]
 
-    cmd = [
-        "ffmpeg", "-y",
+    cmd = ["ffmpeg", "-y"]
+    if is_image:
+        cmd.extend(["-loop", "1", "-framerate", "30"])
+
+    cmd.extend([
         "-i", input_path,
         "-t", str(duration_s),
         "-vf", ",".join(vf_chain),
@@ -129,7 +135,7 @@ def _prepare_broll_clip(
         "-crf", "20",  # Qualidade maior → bitrate mais alto → passa no QC de densidade
         "-an",  # Remove áudio do B-roll
         output_path
-    ]
+    ])
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=300)
         return output_path
@@ -234,6 +240,7 @@ def assemble_video(
         "-c", "copy",
         concat_audio_output,
     ], check=True, capture_output=True, timeout=300)
+    shutil.copy2(concat_audio_output, audio_dir / "narration_full.mp3")
 
     logger.info("✓ [Assembler] Narrations concatenated")
 

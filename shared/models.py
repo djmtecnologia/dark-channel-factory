@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ─────────────────────────────────────────────────────────────
@@ -35,6 +35,48 @@ class SceneType(str, Enum):
     OBJECTION = "objection"
     CTA = "cta"
     OUTRO = "outro"
+
+
+class NarrativePurpose(str, Enum):
+    HOOK = "hook"
+    CONTEXT = "context"
+    TENSION = "tension"
+    TECHNICAL_DETAIL = "technical_detail"
+    REVELATION = "revelation"
+    HISTORICAL_EVIDENCE = "historical_evidence"
+    TRANSFORMATION = "transformation"
+    CTA = "cta"
+
+
+class VisualProductionType(str, Enum):
+    AUTO = "auto"
+    LOCAL_ASSET = "local_asset"
+    STOCK_FOOTAGE = "stock_footage"
+    CINEMATIC_STILL = "cinematic_still"
+    MOTION_GRAPHIC = "motion_graphic"
+    DATA_VIZ = "data_viz"
+    BLENDER_3D = "blender_3d"
+    AI_VIDEO = "ai_video"
+
+
+class CameraFraming(str, Enum):
+    EXTREME_WIDE = "extreme_wide"
+    WIDE = "wide"
+    MEDIUM = "medium"
+    CLOSE_UP = "close_up"
+    EXTREME_CLOSE_UP = "extreme_close_up"
+    MACRO = "macro"
+
+
+class CameraMovement(str, Enum):
+    STATIC = "static"
+    SLOW_PUSH_IN = "slow_push_in"
+    DRAMATIC_PULL_OUT = "dramatic_pull_out"
+    TRACKING_LATERAL = "tracking_lateral"
+    CRANE_SWEEP = "crane_sweep"
+    ORBIT = "orbit"
+    DUTCH_TILT = "dutch_tilt"
+    IMPACT_MICRO_SHAKE = "impact_micro_shake"
 
 
 class Emotion(str, Enum):
@@ -66,6 +108,61 @@ class VideoStatus(str, Enum):
     MONITORING = "monitoring"
     DEEP_DIVE_TRIGGERED = "deep_dive_triggered"
     FAILED = "failed"
+
+
+# ─────────────────────────────────────────────────────────────
+# Metadados de Licença e Rastreabilidade V2
+# ─────────────────────────────────────────────────────────────
+
+class AssetSource(str, Enum):
+    PEXELS = "pexels"
+    PIXABAY = "pixabay"
+    WIKIMEDIA = "wikimedia"
+    WIKIMEDIA_COMMONS = "wikimedia_commons"
+    NASA = "nasa_archive"
+    POLLINATIONS = "pollinations_ai"
+    LOCAL_BANK = "local_bank"
+    BLENDER = "blender_synthetic"
+    FFMPEG_PROCEDURAL = "ffmpeg_procedural"
+
+
+# Aliases canônicos de direção
+ShotType = CameraFraming
+VisualType = VisualProductionType
+
+
+class AssetMetadata(BaseModel):
+    """Metadados individuais de licenciamento e proveniência de ativo."""
+    provider: str = Field(..., description="Origem ex: pexels, pixabay, wikimedia, local_bank")
+    source_id_or_url: str = Field(..., description="URL canônica ou ID na plataforma")
+    license_type: str = Field(..., description="Tipo de licença: cc0, pexels_license, etc.")
+    license_proof_ref: str = Field(..., description="URL ou hash de evidência da licença")
+    attribution_required: bool = Field(default=False)
+    attribution_text: str | None = Field(default=None)
+    acquired_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    local_asset_path: str = Field(...)
+    sha256_hash: str = Field(..., description="Hash SHA-256 de 64 caracteres do arquivo local")
+    commercial_use_approved: bool = Field(default=False, description="Aprovação estrita de uso comercial sem presunções")
+    editorial_only: bool = Field(default=False)
+
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("sha256_hash")
+    @classmethod
+    def _validate_sha256_hash(cls, v: str) -> str:
+        import re
+        s = str(v).strip().lower()
+        if not re.match(r"^[a-f0-9]{64}$", s):
+            raise ValueError("sha256_hash must be a valid 64-character hexadecimal SHA-256 string")
+        return s
+
+    @model_validator(mode="after")
+    def _validate_license_coherence(self) -> "AssetMetadata":
+        if self.editorial_only and self.commercial_use_approved:
+            raise ValueError("Asset marked as editorial_only cannot have commercial_use_approved=True")
+        if self.attribution_required and (not self.attribution_text or not self.attribution_text.strip()):
+            raise ValueError("attribution_text is required when attribution_required is True")
+        return self
 
 
 # ─────────────────────────────────────────────────────────────
@@ -120,19 +217,235 @@ class AffiliateLink(BaseModel):
 
 
 class Scene(BaseModel):
-    id: int
-    scene_type: SceneType
-    text: str = Field(..., description="Texto narrado desta cena")
-    duration_s: float = Field(..., description="Duração estimada em segundos")
+    """
+    Contrato Canônico V2 de Cena — AI Video Director.
+    Suporta intercâmbio canônico e legado com reconciliação bidirecional automática.
+    """
+    # Identificação e Texto (Obrigatórios)
+    id: int = Field(default=1, alias="scene_id", ge=0)
+    narration: str = Field(..., min_length=1, description="Texto narrado oficial (mínimo 1 palavra)")
+    text: str | None = Field(default=None, description="Espelhamento de compatibilidade com consumidores legados")
+    duration_s: float = Field(default=5.0, alias="estimated_duration_s", ge=1.0)
+    timestamp: str | None = Field(default=None, description="Timestamp sequencial da cena ex: 0:00-0:10")
+
+    # Classificação Narrativa
+    scene_type: SceneType = Field(default=SceneType.SOLUTION)
+    narrative_purpose: NarrativePurpose = Field(default=NarrativePurpose.CONTEXT)
     emotion: Emotion = Field(default=Emotion.CURIOSITY)
-    b_roll_query: str = Field(..., description="Query para buscar vídeo de fundo")
+
+    # Prompts Visuais Canônicos
+    b_roll_visual: str = Field(..., min_length=1, description="Prompt visual cinematográfico detalhado")
+    b_roll_query: str = Field(..., min_length=1, description="Query concisa para busca de estoque")
+
+    # Parâmetros de Direção Audiovisual
+    visual_production_type: VisualProductionType = Field(default=VisualProductionType.AUTO)
+    camera_framing: CameraFraming = Field(default=CameraFraming.WIDE)
+    camera_movement: CameraMovement = Field(default=CameraMovement.SLOW_PUSH_IN)
+    lighting_mood: str = Field(default="dark_cinematic")
+    transition_in: str = Field(default="direct_cut")
+    transition_out: str = Field(default="crossfade_slow")
+    continuity_anchor: str | None = Field(default=None)
+
+    # Áudio, Gráficos e Rastreabilidade
+    sfx_cue: str = Field(default="none", description="Efeito sonoro sugerido")
     on_screen_text: str | None = Field(default=None, description="Texto na tela (máx 3 palavras)")
-    sfx_cue: str = Field(default="none", description="Efeito sonoro sugerido (whoosh, click, impact, etc)")
+    visual_cues: list[dict[str, Any]] = Field(default_factory=list, description="Micro visual cues")
+    asset_metadata: AssetMetadata | None = Field(default=None)
+    estimated_cost_tier: int = Field(default=1, ge=1, le=5)
+
+    model_config = ConfigDict(
+        use_enum_values=True,
+        populate_by_name=True,
+        extra="allow",
+    )
+
+    @property
+    def scene_id(self) -> int:
+        return self.id
+
+    @property
+    def estimated_duration_s(self) -> float:
+        return self.duration_s
+
+    @field_validator("narration")
+    @classmethod
+    def _validate_narration_not_empty(cls, v: str) -> str:
+        if v is None:
+            raise ValueError("Narration cannot be None")
+        s = str(v)
+        if not s.strip() or len(s.split()) < 1:
+            raise ValueError("Narration must contain at least one non-empty word")
+        return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reconcile_scene_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            import copy
+            import math
+            data = copy.deepcopy(data)
+            from shared.scene_normalizer import extract_concise_broll_query, normalize_broll_query, CAMERA_MOVEMENT_ALIASES
+
+            # 0. Mapeamentos legados adicionais
+            if "type" in data and "scene_type" not in data:
+                data["scene_type"] = data["type"]
+            if "tier" in data and "estimated_cost_tier" not in data:
+                data["estimated_cost_tier"] = data["tier"]
+            if "overlay_text" in data and "on_screen_text" not in data:
+                data["on_screen_text"] = data["overlay_text"]
+            if "micro_cues" in data and "visual_cues" not in data:
+                data["visual_cues"] = data["micro_cues"]
+            if "anchor_id" in data and "continuity_anchor" not in data:
+                data["continuity_anchor"] = data["anchor_id"]
+
+            # 1. Reconciliação id / scene_id com detecção de conflitos
+            raw_id = data.get("id")
+            raw_scene_id = data.get("scene_id")
+            if raw_id is not None and raw_scene_id is not None:
+                try:
+                    i1, i2 = int(raw_id), int(raw_scene_id)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Scene identifiers must be valid integers: id={raw_id}, scene_id={raw_scene_id}")
+                if i1 != i2:
+                    raise ValueError(f"Conflicting scene identifiers provided: id={raw_id} vs scene_id={raw_scene_id}")
+                final_id = i1
+            elif raw_id is not None:
+                final_id = int(raw_id)
+            elif raw_scene_id is not None:
+                final_id = int(raw_scene_id)
+            else:
+                final_id = 1
+
+            if final_id < 0:
+                raise ValueError(f"Scene identifier must be a non-negative integer >= 0, got {final_id}")
+
+            data["id"] = final_id
+            data["scene_id"] = final_id
+
+            # 2. Reconciliação narration / text / content (não aceita vazio mascarando ausência)
+            narr_raw = data.get("narration")
+            text_raw = data.get("text")
+            content_raw = data.get("content")
+
+            chosen_raw = None
+            if narr_raw is not None:
+                chosen_raw = narr_raw
+            elif text_raw is not None:
+                chosen_raw = text_raw
+            elif content_raw is not None:
+                chosen_raw = content_raw
+
+            if chosen_raw is not None:
+                s_chosen = str(chosen_raw)
+                if s_chosen.strip():
+                    data["narration"] = s_chosen
+                    data["text"] = s_chosen
+                else:
+                    data["narration"] = ""
+                    data["text"] = ""
+            else:
+                data["narration"] = ""
+                data["text"] = ""
+
+            # 3. Reconciliação duration_s / estimated_duration_s / duration
+            dur_s = data.get("duration_s")
+            est_dur = data.get("estimated_duration_s")
+            gen_dur = data.get("duration")
+
+            if dur_s is not None and est_dur is not None:
+                try:
+                    d1, d2 = float(dur_s), float(est_dur)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Duration values must be numeric: duration_s={dur_s}, estimated_duration_s={est_dur}")
+                if math.isnan(d1) or math.isnan(d2) or math.isinf(d1) or math.isinf(d2):
+                    raise ValueError("Duration cannot be NaN or infinite")
+                if d1 <= 0.0 or d2 <= 0.0:
+                    raise ValueError(f"Duration must be greater than zero: duration_s={d1}, estimated_duration_s={d2}")
+                if abs(d1 - d2) > 0.01:
+                    raise ValueError(f"Conflicting duration values provided: duration_s={dur_s} vs estimated_duration_s={est_dur}")
+                candidate_d = d1
+            elif dur_s is not None:
+                candidate_d = float(dur_s)
+            elif est_dur is not None:
+                candidate_d = float(est_dur)
+            elif gen_dur is not None:
+                candidate_d = float(gen_dur)
+            else:
+                candidate_d = 5.0
+
+            if math.isnan(candidate_d) or math.isinf(candidate_d):
+                raise ValueError("Duration cannot be NaN or infinite")
+            if candidate_d <= 0.0:
+                raise ValueError(f"Duration must be greater than zero, got {candidate_d}")
+
+            final_dur = max(1.0, candidate_d)
+            data["duration_s"] = final_dur
+            data["estimated_duration_s"] = final_dur
+
+            # 4. Reconciliação b_roll_visual / b_roll_query / visual_description
+            vis_canonical = data.get("b_roll_visual")
+            vis_legacy = (
+                data.get("visual_description")
+                or data.get("visual_prompt")
+                or data.get("visual")
+            )
+            query = data.get("b_roll_query") or data.get("query")
+
+            is_v2_context = any(k in data for k in (
+                "camera_framing", "camera_movement", "narrative_purpose",
+                "visual_production_type", "asset_metadata", "lighting_mood"
+            )) or bool(narr_raw and not text_raw)
+
+            if vis_canonical and not query:
+                clean_vis = str(vis_canonical).strip()
+                data["b_roll_visual"] = clean_vis
+                data["b_roll_query"] = extract_concise_broll_query(clean_vis)
+            elif vis_legacy and not query and not vis_canonical:
+                clean_leg = str(vis_legacy).strip()
+                data["b_roll_visual"] = clean_leg
+                data["b_roll_query"] = clean_leg
+            elif query and not vis_canonical and not vis_legacy:
+                clean_q = str(query).strip()
+                if is_v2_context:
+                    norm_q = normalize_broll_query(clean_q) if len(clean_q.split()) > 5 else clean_q
+                    data["b_roll_query"] = norm_q
+                    data["b_roll_visual"] = f"Cinematic visual representation based on: {norm_q}"
+                else:
+                    data["b_roll_query"] = clean_q
+                    data["b_roll_visual"] = clean_q
+            elif (vis_canonical or vis_legacy) and query:
+                # Ambos fornecidos: preserva ambos os campos independentemente sem sobrescrita
+                vis = vis_canonical or vis_legacy
+                data["b_roll_visual"] = str(vis).strip()
+                data["b_roll_query"] = str(query).strip()
+
+            # 5. Normalização de case e aliases para enums
+            for enum_field in (
+                "camera_framing", "camera_movement", "narrative_purpose",
+                "visual_production_type", "scene_type", "emotion"
+            ):
+                val = data.get(enum_field)
+                if hasattr(val, "value"):
+                    val = val.value
+                if isinstance(val, str):
+                    clean_v = val.strip().lower()
+                    if enum_field == "camera_movement":
+                        clean_v = CAMERA_MOVEMENT_ALIASES.get(clean_v, clean_v)
+                    elif enum_field == "emotion" and clean_v in {"authority", "confidence"}:
+                        clean_v = "trust"
+                    data[enum_field] = clean_v
+
+        return data
 
 
 class ScriptData(BaseModel):
     """Output do Copywriter Agent — input dos Agents 3 e 4."""
     job_id: UUID
+    source_job_id: UUID | None = Field(
+        default=None,
+        description="ID do roteiro matriz usado para compartilhar os mesmos B-rolls entre idiomas",
+    )
+    target_channel_id: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     niche_data: NicheData
 

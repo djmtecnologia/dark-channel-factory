@@ -116,11 +116,16 @@ def remove_duplicate_scenes(scenes: List[Dict]) -> Tuple[List[Dict], List[int]]:
 # 3. VISUAL CUE COMPLETENESS CHECK
 # ─────────────────────────────────────────────────
 def check_visual_cues(scenes: List[Dict]) -> List[int]:
-    """Returns list of scene indices missing a proper b_roll_visual."""
+    """Returns list of scene indices missing a proper b_roll_visual or b_roll_query."""
     missing = []
     for idx, scene in enumerate(scenes):
-        visual = str(scene.get("b_roll_visual") or scene.get("visual") or "").strip()
-        # Must be in English and at least 3 words
+        visual = str(
+            scene.get("b_roll_visual")
+            or scene.get("b_roll_query")
+            or scene.get("visual")
+            or ""
+        ).strip()
+        # Must be at least 3 words
         if len(visual.split()) < 3:
             missing.append(idx)
     return missing
@@ -251,22 +256,33 @@ class ScriptValidationResult:
         return "\n".join(lines)
 
 
-def validate_and_fix_script(script_data: dict, is_short: bool = False) -> Tuple[dict, ScriptValidationResult]:
+def validate_and_fix_script(script_data: dict, is_short: bool = False, profile: str | None = None) -> Tuple[dict, ScriptValidationResult]:
     """
     Full validation + auto-fix pipeline. Returns the cleaned script_data
     and a ScriptValidationResult object.
 
     Usage in copywriter.py:
-        script_data, result = validate_and_fix_script(script_data, is_short)
+        script_data, result = validate_and_fix_script(script_data, is_short, profile)
         print(result.report())
     """
-    result = ScriptValidationResult()
-    scenes = script_data.get("scenes", [])
+    from shared.scene_normalizer import normalize_scenes
+    from shared.production_profiles import resolve_profile, validate_script_word_count
 
-    if not isinstance(scenes, list) or len(scenes) == 0:
+    result = ScriptValidationResult()
+    raw_scenes = script_data.get("scenes", [])
+
+    if not isinstance(raw_scenes, list) or len(raw_scenes) == 0:
         result.passed = False
         result.errors.append("No scenes found in script_data.")
         return script_data, result
+
+    # Resolve production profile
+    raw_profile = profile or script_data.get("production_profile") or script_data.get("profile")
+    resolved_profile = resolve_profile(profile_name=raw_profile)
+
+    # Normalize scenes to unify b_roll_visual, b_roll_query, narration, text, and timings
+    scenes = normalize_scenes(raw_scenes, fallback_topic=script_data.get("title"))
+    script_data["scenes"] = scenes
 
     # ── Step 1: Remove duplicate scenes ────────────────────────
     cleaned_scenes, removed_indices = remove_duplicate_scenes(scenes)
@@ -333,10 +349,14 @@ def validate_and_fix_script(script_data: dict, is_short: bool = False) -> Tuple[
     )
     result.word_count = total_words
 
-    if not is_short and total_words < _MIN_TOTAL_WORDS_LONG:
-        result.errors.append(
-            f"Script too short: {total_words} words. Minimum is {_MIN_TOTAL_WORDS_LONG}."
-        )
+    words_ok, words_err = validate_script_word_count(
+        word_count=total_words,
+        profile=resolved_profile,
+        is_short=is_short,
+        validator_type="script"
+    )
+    if not words_ok and words_err:
+        result.errors.append(words_err)
         result.passed = False
 
     # ── Step 8: Update script_full ──────────────────────────────

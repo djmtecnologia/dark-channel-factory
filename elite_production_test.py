@@ -22,13 +22,32 @@ except: pass
 
 load_dotenv()
 
-# 2. CONFIGURAÇÃO DE BANCO DE DADOS (Resiliência)
-DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_engine(
-    DATABASE_URL, 
-    pool_pre_ping=True,
-    pool_recycle=300
-)
+# 2. CONFIGURAÇÃO DE BANCO DE DADOS (Resiliência com Fallback SQLite)
+def get_resilient_engine():
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        try:
+            eng = create_engine(
+                db_url, 
+                pool_pre_ping=True,
+                pool_recycle=300,
+                connect_args={"connect_timeout": 10} if "postgresql" in db_url else {}
+            )
+            # Testa se a conexão realmente responde
+            with eng.connect() as conn:
+                pass
+            return eng
+        except Exception as exc:
+            print(f"⚠️ [DB] Conexão com PostgreSQL remoto falhou ({exc}). Ativando fallback automático para SQLite local...")
+    
+    sqlite_path = os.path.abspath("output/logs/factory.db")
+    os.makedirs(os.path.dirname(sqlite_path), exist_ok=True)
+    sqlite_url = f"sqlite:///{sqlite_path}"
+    eng = create_engine(sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(eng)
+    return eng
+
+engine = get_resilient_engine()
 
 async def create_real_viral_jobs(channel, count):
     """Minera tendências reais de 2026 com diversificação e cria a fila."""

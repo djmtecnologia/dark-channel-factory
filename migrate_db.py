@@ -10,11 +10,12 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    print("❌ DATABASE_URL não configurada no .env. Abortando.")
-    exit(1)
 
-engine = create_engine(DATABASE_URL)
+def _get_default_engine():
+    if not DATABASE_URL:
+        print("❌ DATABASE_URL não configurada no .env. Abortando.")
+        raise SystemExit(1)
+    return create_engine(DATABASE_URL)
 
 MIGRATIONS = [
     # Migração 001 — scheduled_at (anterior)
@@ -37,12 +38,46 @@ MIGRATIONS = [
     
     # Migração 006 — identifier na tabela channels
     ("channel_identifier", "ALTER TABLE channels ADD COLUMN IF NOT EXISTS identifier VARCHAR(100);"),
+    
+    # Migração 007 — production_profile na tabela video_jobs (Fase 1: PILOT_5MIN, STANDARD_10MIN, etc.)
+    ("production_profile", "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS production_profile VARCHAR(50);"),
+
+    # Migração 008 — video_director_mode na tabela video_jobs (Sprint 2.5: 'legacy', 'director' ou NULL)
+    ("video_director_mode_col", "ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS video_director_mode VARCHAR(32);"),
+    (
+        "video_director_mode_check",
+        "DO $$ BEGIN "
+        "IF NOT EXISTS ("
+        "SELECT 1 FROM pg_constraint c "
+        "JOIN pg_class t ON t.oid = c.conrelid "
+        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE c.conname = 'chk_video_jobs_video_director_mode' "
+        "AND t.relname = 'video_jobs' "
+        "AND n.nspname = current_schema()"
+        ") THEN "
+        "ALTER TABLE video_jobs ADD CONSTRAINT chk_video_jobs_video_director_mode "
+        "CHECK (video_director_mode IS NULL OR video_director_mode IN ('legacy', 'director')); "
+        "END IF; "
+        "END $$;",
+    ),
+    (
+        "video_director_mode_idx",
+        "CREATE INDEX IF NOT EXISTS ix_video_jobs_video_director_mode ON video_jobs (video_director_mode);",
+    ),
 ]
 
-def migrate():
+DOWNGRADE_MIGRATIONS = [
+    ("video_director_mode_idx", "DROP INDEX IF EXISTS ix_video_jobs_video_director_mode;"),
+    ("video_director_mode_check", "ALTER TABLE video_jobs DROP CONSTRAINT IF EXISTS chk_video_jobs_video_director_mode;"),
+    ("video_director_mode_col", "ALTER TABLE video_jobs DROP COLUMN IF EXISTS video_director_mode;"),
+]
+
+def migrate(target_engine=None):
+    active_engine = target_engine or _get_default_engine()
     print("🛠️  Iniciando Migração de Banco de Dados...")
-    print(f"📡 Destino: {DATABASE_URL[:40]}...")
-    with engine.connect() as conn:
+    if target_engine is None:
+        print(f"📡 Destino: {DATABASE_URL[:40]}...")
+    with active_engine.connect() as conn:
         for name, sql in MIGRATIONS:
             try:
                 print(f"  ▶ Aplicando: {name}...")
@@ -50,15 +85,27 @@ def migrate():
                 conn.commit()
                 print(f"  ✅ {name}: OK")
             except Exception as e:
-                err_str = str(e)
-                # Ignorar erros de 'coluna já existe' — migração idempotente
-                if "already exists" in err_str or "does not exist" in err_str:
-                    print(f"  ⏭  {name}: Coluna já existe ou não aplicável — ignorando.")
-                    conn.rollback()
-                else:
-                    print(f"  ❌ Erro em {name}: {e}")
-                    conn.rollback()
+                conn.rollback()
+                print(f"  ❌ Falha na migration '{name}': {e}")
+                raise
     print("\n✅ Migração concluída. Banco de dados atualizado.")
+
+
+def downgrade(target_engine=None):
+    active_engine = target_engine or _get_default_engine()
+    print("⏪ Iniciando Downgrade de Migração...")
+    with active_engine.connect() as conn:
+        for name, sql in DOWNGRADE_MIGRATIONS:
+            try:
+                print(f"  ▶ Revertendo: {name}...")
+                conn.execute(text(sql))
+                conn.commit()
+                print(f"  ✅ {name}: OK")
+            except Exception as e:
+                conn.rollback()
+                print(f"  ❌ Falha no downgrade '{name}': {e}")
+                raise
+    print("\n✅ Downgrade concluído.")
 
 if __name__ == "__main__":
     migrate()

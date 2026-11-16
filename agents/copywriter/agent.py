@@ -1,258 +1,209 @@
-"""
-Copywriter Agent — Dark Channel Factory
-Agent 2: Gera roteiro completo, metadados SEO e links afiliados.
-Implementa engenharia defensiva, RAG estruturado e loop Generator-Critic de auto-correção.
-"""
+"""Copywriter local: roteiro matriz no Ollama e localização sem recriar a estrutura."""
 from __future__ import annotations
 
 import json
-import traceback
-from uuid import UUID
-
-from dotenv import load_dotenv
+import math
+from copy import deepcopy
+from uuid import UUID, uuid4
 
 from agents.copywriter.affiliate_links import build_pinned_comment, get_relevant_products
 from agents.copywriter.prompts import COPYWRITER_SYSTEM_PROMPT, COPYWRITER_USER_PROMPT_TEMPLATE
-from agents.content_validator.agent import run_content_validator_agent
 from orchestrator.config import get_channel, get_default_channel
 from orchestrator.queue_manager import QUEUE_DESIGNER, QUEUE_VIDEO, get_queue_manager
-from shared.llm_client import get_llm_client
 from shared.logger import get_logger
 from shared.models import (
-    AffiliateLink,
-    AffiliatePlatform,
-    NicheData,
-    Scene,
-    SceneType,
-    Emotion,
-    ScriptData,
+    AffiliateLink, AffiliatePlatform, Emotion, NicheData, Scene, SceneType, ScriptData,
 )
+from shared.ollama_client import OllamaClient, get_ollama_client
 
-load_dotenv()
 logger = get_logger(__name__)
+
+LOCALIZATION_TARGETS = {
+    "ai_tools_us": {"language": "en-US", "country": "United States", "currency": "USD"},
+    "ai_tools_de": {"language": "de-DE", "country": "Germany", "currency": "EUR"},
+    "ai_tools_es": {"language": "es-ES", "country": "Spain", "currency": "EUR"},
+    "ai_tools_fr": {"language": "fr-FR", "country": "France", "currency": "EUR"},
+}
+
+
+def _clean_products(products: list[dict]) -> list[dict]:
+    return [
+        {
+            "platform": p.get("platform", "direct"),
+            "product_name": p["product_name"],
+            "product_description": p.get("product_description", ""),
+            "url": p["url"],
+            "commission_percent": p.get("commission_percent", 0),
+        }
+        for p in products
+    ]
+
+
+def generate_matrix_script(
+    niche_data: NicheData,
+    ollama: OllamaClient | None = None,
+) -> tuple[dict, list[dict]]:
+    """Gera uma única estrutura narrativa, com buscas visuais neutras em inglês."""
+    channel = get_channel(niche_data.channel_id) or get_default_channel()
+    products = get_relevant_products(
+        [niche_data.primary_keyword, *niche_data.secondary_keywords, *niche_data.lsi_keywords],
+        max_products=3,
+    )
+    product_context = json.dumps(_clean_products(products), ensure_ascii=False)
+    prompt = COPYWRITER_USER_PROMPT_TEMPLATE.format(
+        niche_data=json.dumps(niche_data.model_dump(mode="json"), ensure_ascii=False, default=str),
+        language=niche_data.language or channel.language,
+        target_duration=channel.target_duration_s,
+        min_scenes=math.ceil(channel.target_duration_s / 25),
+        cpm=niche_data.estimated_cpm_usd,
+        monetization_products=product_context,
+    )
+    prompt += """
+
+SINGLE SOURCE OF TRUTH RULES:
+- This is the MATRIX SCRIPT. Create the narrative and scene order only once.
+- Every scene id, scene_type, duration_s, emotion and b_roll_query is immutable.
+- b_roll_query must be concise English and culturally neutral so footage can be reused.
+- Return only the JSON object required by the schema."""
+    data = (ollama or get_ollama_client()).chat_json(
+        COPYWRITER_SYSTEM_PROMPT, prompt, temperature=0.55, num_predict=6000
+    )
+    return data, products
+
+
+def localize_script(
+    matrix: dict,
+    target: dict,
+    ollama: OllamaClient | None = None,
+) -> dict:
+    """Traduz/adapta somente campos textuais, preservando a estrutura do vídeo."""
+    immutable = [
+        {
+            "id": s["id"],
+            "scene_type": s.get("scene_type", "solution"),
+            "duration_s": s.get("duration_s", 25),
+            "emotion": s.get("emotion", "curiosity"),
+            "b_roll_query": s.get("b_roll_query", "technology office"),
+        }
+        for s in matrix.get("scenes", [])
+    ]
+    prompt = f"""Localize the MATRIX SCRIPT below for {target['country']} ({target['language']}).
+Translate and culturally adapt title, description, tags, pinned_comment, thumbnail_brief,
+and scene text/on_screen_text. Convert examples, measurements and monetary references to
+{target['currency']}. Do not add, remove, merge or reorder scenes. Copy every immutable
+field exactly. Keep affiliate URLs unchanged. Return the complete script as JSON.
+
+IMMUTABLE SCENE CONTRACT:
+{json.dumps(immutable, ensure_ascii=False)}
+
+MATRIX SCRIPT:
+{json.dumps(matrix, ensure_ascii=False)}"""
+    localized = (ollama or get_ollama_client()).chat_json(
+        "You are a precise audiovisual localization editor. Output JSON only.",
+        prompt,
+        temperature=0.15,
+        num_predict=6000,
+    )
+    localized_scenes = localized.get("scenes", [])
+    if len(localized_scenes) != len(immutable):
+        raise ValueError("Localização alterou a quantidade de cenas do roteiro matriz")
+    for scene, fixed in zip(localized_scenes, immutable):
+        scene.update(fixed)
+    return localized
+
+
+def _to_script_data(
+    data: dict,
+    niche: NicheData,
+    products: list[dict],
+    *,
+    job_id: UUID,
+    source_job_id: UUID,
+    channel_id: str,
+    language: str,
+) -> ScriptData:
+    affiliates = []
+    for item in data.get("affiliate_links") or _clean_products(products):
+        platform_value = str(item.get("platform", "direct")).lower()
+        platform = AffiliatePlatform(platform_value) if platform_value in AffiliatePlatform._value2member_map_ else AffiliatePlatform.DIRECT
+        affiliates.append(AffiliateLink(
+            platform=platform,
+            product_name=item["product_name"],
+            product_description=item.get("product_description", ""),
+            url=item["url"],
+            commission_percent=float(item.get("commission_percent", 0)),
+        ))
+    scenes = []
+    for item in data["scenes"]:
+        scene_type = str(item.get("scene_type", "solution")).lower()
+        emotion = str(item.get("emotion", "curiosity")).lower()
+        scenes.append(Scene(
+            id=int(item["id"]),
+            scene_type=SceneType(scene_type) if scene_type in SceneType._value2member_map_ else SceneType.SOLUTION,
+            text=item["text"],
+            duration_s=float(item.get("duration_s", 25)),
+            emotion=Emotion(emotion) if emotion in Emotion._value2member_map_ else Emotion.CURIOSITY,
+            b_roll_query=item.get("b_roll_query", "technology office"),
+            on_screen_text=item.get("on_screen_text"),
+            sfx_cue=item.get("sfx_cue", "none"),
+        ))
+    local_niche = niche.model_copy(deep=True)
+    local_niche.job_id = job_id
+    local_niche.channel_id = channel_id
+    local_niche.language = language
+    return ScriptData(
+        job_id=job_id,
+        source_job_id=source_job_id,
+        target_channel_id=channel_id,
+        niche_data=local_niche,
+        title=data["title"][:100],
+        description=data.get("description", "")[:5000],
+        tags=data.get("tags", [niche.primary_keyword])[:15],
+        category_id=str(data.get("category_id", "28")),
+        language=language,
+        affiliate_links=affiliates,
+        pinned_comment=data.get("pinned_comment") or build_pinned_comment(products),
+        scenes=scenes,
+        total_duration_s=sum(s.duration_s for s in scenes),
+        music_mood=data.get("music_mood", "suspense"),
+        thumbnail_brief=data.get("thumbnail_brief", data["title"]),
+        thumbnail_dominant_color=data.get("thumbnail_dominant_color", "#FF6B35"),
+    )
 
 
 def run_copywriter_agent(niche_data_dict: dict) -> ScriptData:
-    """
-    Executa o Copywriter Agent com um loop Generator-Critic de auto-correção.
+    """Gera a matriz e despacha quatro localizações que compartilham os B-rolls."""
+    niche = NicheData(**niche_data_dict)
+    ollama = get_ollama_client()
+    if not ollama.healthcheck():
+        raise RuntimeError("Ollama indisponível em http://localhost:11434. Execute: ollama serve")
 
-    Args:
-        niche_data_dict: NicheData serializado como dict (vindo da fila RQ)
-    """
-    niche_data = NicheData(**niche_data_dict)
-    logger.info(f"✍️ [Copywriter] Starting | job={niche_data.job_id} | topic='{niche_data.topic}'")
-
-    channel = get_channel(niche_data.channel_id) or get_default_channel()
-    llm = get_llm_client()
-
-    # ── Step 1: Selecionar produtos afiliados (RAG Grounding Context) ──────────────────
-    all_kws = [niche_data.primary_keyword] + niche_data.secondary_keywords + niche_data.lsi_keywords
-    affiliate_products = get_relevant_products(all_kws, max_products=3)
-    logger.info(f"💰 [Copywriter RAG] Selected {len(affiliate_products)} affiliate products for grounding")
-
-    # Formata produtos em uma string estruturada XML para RAG limpo
-    monetization_products = ""
-    for idx, p in enumerate(affiliate_products, 1):
-        monetization_products += (
-            f"PRODUCT {idx}:\n"
-            f"- Name: {p['product_name']}\n"
-            f"- Description: {p['product_description']}\n"
-            f"- Direct URL: {p['url']}\n"
-            f"- Commission: {p['commission_percent']}%\n\n"
+    logger.info("[Copywriter] Gerando roteiro matriz local no Ollama")
+    matrix, products = generate_matrix_script(niche, ollama)
+    source_job_id = niche.job_id
+    localized_scripts: list[ScriptData] = []
+    for channel_id, target in LOCALIZATION_TARGETS.items():
+        localized = (
+            deepcopy(matrix)
+            if target["language"] == (niche.language or "en-US")
+            else localize_script(matrix, target, ollama)
         )
-
-    # ── Step 2: Loop Generator-Critic de Auto-Correção (Self-Healing Loop) ──────────────
-    max_attempts = 4
-    attempt_feedback = ""
-    best_script_data: ScriptData | None = None
-    best_originality_score = 0.0
-
-    for attempt in range(1, max_attempts + 1):
-        logger.info(f"🔄 [Copywriter Generator] Generation Attempt {attempt}/{max_attempts}...")
-
-        # Monta prompt aplicando as diretrizes de delimitação XML e RAG
-        import math
-        user_prompt = COPYWRITER_USER_PROMPT_TEMPLATE.format(
-            niche_data=json.dumps(niche_data.model_dump(mode="json"), indent=2),
-            language=niche_data.language or channel.language,
-            target_duration=channel.target_duration_s,
-            min_scenes=math.ceil(channel.target_duration_s / 25),
-            cpm=niche_data.estimated_cpm_usd,
-            monetization_products=monetization_products.strip() or "No affiliate products available.",
-        )
-
-        # Injeta o feedback crítico se estiver em uma tentativa de re-geração
-        if attempt_feedback:
-            user_prompt += (
-                f"\n\n<validation_feedback>\n"
-                f"Your previous attempt FAILED validation. Please fix these issues:\n"
-                f"{attempt_feedback}\n"
-                f"</validation_feedback>\n"
-                f"Regenerate the COMPLETE script, resolving ALL issues and preserving valid structures."
-            )
-
-        # Chamada do LLM com Temperatura balanceada (0.65 para criatividade narrativa ancorada)
-        try:
-            llm_response = llm.complete(
-                system_prompt=COPYWRITER_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                temperature=0.65,
-                max_tokens=6000,
-                json_mode=True,
-            )
-            raw = llm_response.text.strip()
-        except Exception as llm_err:
-            logger.error(f"❌ [Copywriter LLM Error] Attempt {attempt} failed: {llm_err}")
-            attempt_feedback = f"LLM API failure encountered: {str(llm_err)}"
-            continue
-
-        # Limpeza básica de Markdown blocks se o LLM ignorar o json_mode
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        
-        # ── Step 3: Validação Estruturada (JSON & Pydantic Typings) ─────────────────
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as json_err:
-            logger.warning(f"⚠️ [Copywriter JSON Error] Invalid JSON in attempt {attempt}: {json_err}")
-            attempt_feedback = f"JSON decoding failed: {str(json_err)}. Ensure you output pure, parseable JSON only."
-            continue
-
-        # Inicia a construção dos objetos validados Pydantic para tipagem forte
-        try:
-            # Affiliate Links
-            affiliate_links: list[AffiliateLink] = []
-            llm_affiliates = data.get("affiliate_links", [])
-            if llm_affiliates:
-                for item in llm_affiliates:
-                    platform_str = item.get("platform", "direct").lower()
-                    platform = AffiliatePlatform(platform_str) if platform_str in AffiliatePlatform._value2member_map_ else AffiliatePlatform.DIRECT
-                    affiliate_links.append(AffiliateLink(
-                        platform=platform,
-                        product_name=item["product_name"],
-                        product_description=item.get("product_description", ""),
-                        url=item["url"],
-                        commission_percent=float(item.get("commission_percent", 0)),
-                    ))
-
-            # Caso faltem links na resposta, ancora nos produtos recomendados pelo RAG
-            if len(affiliate_links) < 2:
-                for p in affiliate_products:
-                    platform_str = p["platform"]
-                    platform = AffiliatePlatform(platform_str) if platform_str in AffiliatePlatform._value2member_map_ else AffiliatePlatform.DIRECT
-                    affiliate_links.append(AffiliateLink(
-                        platform=platform,
-                        product_name=p["product_name"],
-                        product_description=p["product_description"],
-                        url=p["url"],
-                        commission_percent=p["commission_percent"],
-                    ))
-
-            pinned = data.get("pinned_comment") or build_pinned_comment(affiliate_products)
-
-            # Scenes
-            scenes: list[Scene] = []
-            for sc in data.get("scenes", []):
-                scene_type_str = sc.get("scene_type", "solution").lower()
-                scene_type = SceneType(scene_type_str) if scene_type_str in SceneType._value2member_map_ else SceneType.SOLUTION
-                emotion_str = sc.get("emotion", "curiosity").lower()
-                emotion = Emotion(emotion_str) if emotion_str in Emotion._value2member_map_ else Emotion.CURIOSITY
-
-                scenes.append(Scene(
-                    id=sc["id"],
-                    scene_type=scene_type,
-                    text=sc["text"],
-                    duration_s=float(sc.get("duration_s", 25)),
-                    emotion=emotion,
-                    b_roll_query=sc.get("b_roll_query", "technology business automation"),
-                    on_screen_text=sc.get("on_screen_text"),
-                    sfx_cue=sc.get("sfx_cue", "none"),
-                ))
-
-            total_duration = sum(s.duration_s for s in scenes) or float(data.get("total_duration_s", channel.target_duration_s))
-
-            # Instanciação Pydantic - Garante consistência total de tipos e valores
-            script_data = ScriptData(
-                job_id=niche_data.job_id,
-                niche_data=niche_data,
-                title=data["title"][:100],
-                description=data.get("description", "")[:5000],
-                tags=data.get("tags", [niche_data.primary_keyword])[:15],
-                category_id=data.get("category_id", "28"),
-                language=niche_data.language or channel.language,
-                affiliate_links=affiliate_links,
-                pinned_comment=pinned,
-                scenes=scenes,
-                total_duration_s=total_duration,
-                music_mood=data.get("music_mood", "suspense"),
-                thumbnail_brief=data.get("thumbnail_brief", f"Bold text '{data['title'][:20]}' on dark background, shocking expression"),
-                thumbnail_dominant_color=data.get("thumbnail_dominant_color", "#FF6B35"),
-            )
-
-        except Exception as pydantic_err:
-            logger.warning(f"⚠️ [Copywriter Pydantic Error] Typing validation failed in attempt {attempt}: {pydantic_err}")
-            attempt_feedback = f"Pydantic Validation failed: {str(pydantic_err)}. Ensure all fields like 'scenes', 'title', and 'description' conform strictly to the required types."
-            continue
-
-        # ── Step 4: Orquestração Multi-Agente (Critic Agent Evaluation) ─────────────
-        logger.info("🕵️ [Critic Agent] Invoking Content Validator for cross-checking...")
-        
-        # Executa o Critic Agent de forma síncrona sem afetar a fila ou gravar erro definitivo no banco de dados
-        critic_result = run_content_validator_agent(
-            script_data.model_dump(mode="json"),
-            save_db=False,
-            forward=False
-        )
-
-        if critic_result.passed:
-            logger.info("🎉 [Critic Agent] Script approved and verified successfully!")
-            best_script_data = script_data
-            break
-        else:
-            logger.warning(
-                f"❌ [Critic Agent] Script REJECTED in attempt {attempt} | "
-                f"Originality={critic_result.originality_score} | Narrative={critic_result.narrative_quality_score} | Value={critic_result.transformative_value_score}"
-            )
-            
-            # Compila o feedback do avaliador para alimentar a próxima tentativa do gerador
-            feedback_issues = "\n".join(f"- CRITICAL ISSUE: {issue}" for issue in critic_result.issues)
-            feedback_suggestions = "\n".join(f"- SUGGESTION: {sug}" for sug in critic_result.suggestions)
-            
-            attempt_feedback = (
-                f"The Critic Agent audited your work and found the following errors:\n"
-                f"{feedback_issues}\n"
-                f"{feedback_suggestions}\n"
-                f"Refactor and correct your narration text, pacing, hook and structure in the next iteration."
-            )
-
-            # Salva o melhor script gerado em caso de estourar as tentativas
-            if critic_result.originality_score > best_originality_score:
-                best_originality_score = critic_result.originality_score
-                best_script_data = script_data
-
-    # ── Step 5: Fallback de Segurança se todas as tentativas falharem ──────────────
-    if not best_script_data:
-        logger.critical("🚨 [Copywriter Failure] All generation attempts failed JSON/Pydantic validation! Aborting.")
-        raise RuntimeError("Copywriter failed to produce a valid ScriptData object after multiple attempts.")
-
-    # Se passamos mas com avisos/rejeição nas retries, usamos a melhor versão salva no loop
-    script_data = best_script_data
-    logger.info(
-        f"✅ [Copywriter] Finalized Script | title='{script_data.title}' | "
-        f"scenes={len(script_data.scenes)} | duration={int(script_data.total_duration_s)}s"
-    )
-
-    # ── Step 6: Enfileirar Video Editor E Designer em paralelo ───────────────────
-    from agents.video_editor.agent import run_video_editor_agent
-    from agents.designer.agent import run_designer_agent
+        localized_scripts.append(_to_script_data(
+            localized,
+            niche,
+            products,
+            job_id=source_job_id if not localized_scripts else uuid4(),
+            source_job_id=source_job_id,
+            channel_id=channel_id,
+            language=target["language"],
+        ))
 
     qm = get_queue_manager()
-    script_dict = script_data.model_dump(mode="json")
-
-    qm.enqueue(QUEUE_VIDEO, run_video_editor_agent, script_dict, job_timeout=3600)
-    qm.enqueue(QUEUE_DESIGNER, run_designer_agent, script_dict, job_timeout=1800)
-
-    logger.info(f"→ [Copywriter] Dispatching approved job to '{QUEUE_VIDEO}' and '{QUEUE_DESIGNER}'")
-    return script_data
+    from agents.designer.agent import run_designer_agent
+    from agents.video_editor.agent import run_video_editor_agent
+    for script in localized_scripts:
+        payload = script.model_dump(mode="json")
+        qm.enqueue(QUEUE_VIDEO, run_video_editor_agent, payload, job_timeout=7200)
+        qm.enqueue(QUEUE_DESIGNER, run_designer_agent, payload, job_timeout=1800)
+    logger.info("[Copywriter] 4 localizações enfileiradas com source_job_id=%s", source_job_id)
+    return localized_scripts[0]

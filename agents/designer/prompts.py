@@ -1,6 +1,6 @@
 """
 Designer Agent — System Prompts
-Prompts para geração de thumbnails de alto CTR via DALL-E 3.
+Prompts para conceitos de thumbnails de alto CTR.
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ Your mission is to replicate the 'CRISIS & SHOCK' model:
 4. DRAMATIC LIGHTING: Use high contrast, rim lighting, and a dark, moody background to make the subjects pop.
 5. NO 'AI SLOP': Avoid generic robots. Focus on high-end cinematic photography style.
 
-DALL-E 3 PROMPT ENGINEERING:
-- FORBID TEXT: Always include `NO TEXT, NO LETTERS, NO WORDS` in the DALL-E prompt itself (we will add it via Pillow).
+IMAGE MODEL PROMPT ENGINEERING:
+- FORBID TEXT: Always include `NO TEXT, NO LETTERS, NO WORDS` in the image prompt itself (we will add it via Pillow).
 - FOCUS: Close-up on facial expressions + The thing they are looking at.
 - STYLE: Cinematic, hyper-realistic, 8k resolution, documentary photography."""
 

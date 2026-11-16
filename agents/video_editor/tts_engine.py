@@ -20,10 +20,10 @@ logger = get_logger(__name__)
 RECOMMENDED_VOICES = {
     "en-US": {
         "female_professional": "en-US-AriaNeural",
-        "male_professional": "en-US-GuyNeural",
+        "male_professional": "en-US-ChristopherNeural",
         "female_energetic": "en-US-JennyNeural",
         "male_energetic": "en-US-EricNeural",
-        "default": "en-US-GuyNeural",
+        "default": "en-US-ChristopherNeural",
     },
     "pt-BR": {
         "female_professional": "pt-BR-FranciscaNeural",
@@ -42,18 +42,58 @@ RECOMMENDED_VOICES = {
     },
     "de-DE": {
         "female_professional": "de-DE-KatjaNeural",
-        "male_professional": "de-DE-ConradNeural",
-        "default": "de-DE-ConradNeural",
+        "male_professional": "de-DE-KillianNeural",
+        "default": "de-DE-KillianNeural",
+    },
+    "it-IT": {
+        "female_professional": "it-IT-ElsaNeural",
+        "male_professional": "it-IT-DiegoNeural",
+        "default": "it-IT-DiegoNeural",
     },
 }
 
 def get_voice_for_language(language: str, style: str = "male_professional") -> str:
-    """Returns the best voice for a given language/region code."""
-    # Normalize: 'en-US' and 'en-GB' both map to en-US voices
-    lang_map = {"en-GB": "en-US", "en-AU": "en-US", "es-MX": "es-ES", "es-CO": "es-ES"}
-    lang = lang_map.get(language, language)
-    voices = RECOMMENDED_VOICES.get(lang, RECOMMENDED_VOICES["en-US"])
-    return voices.get(style, voices.get("default", "en-US-GuyNeural"))
+    """
+    Retorna a voz neural ideal baseada dinamicamente no idioma do roteiro.
+    Suporta códigos de idioma no formato 'll-CC' (ex: 'en-US', 'de-DE', 'es-ES'), 
+    prefixos genéricos (ex: 'en', 'de', 'es') e variantes de região.
+    """
+    if not language:
+        return RECOMMENDED_VOICES["en-US"]["default"]
+
+    # Mapeamento de variações de idioma para a chave base do dicionário
+    lang_map = {
+        "en": "en-US", "en-us": "en-US", "en-gb": "en-US", "en-au": "en-US",
+        "pt": "pt-BR", "pt-br": "pt-BR", "pt-pt": "pt-BR",
+        "es": "es-ES", "es-es": "es-ES", "es-mx": "es-ES", "es-co": "es-ES",
+        "fr": "fr-FR", "fr-fr": "fr-FR", "fr-ca": "fr-FR",
+        "de": "de-DE", "de-de": "de-DE", "de-at": "de-DE", "de-ch": "de-DE",
+        "it": "it-IT", "it-it": "it-IT",
+    }
+
+    norm_lang = language.strip().lower()
+    
+    # 1. Checa correspondência exata ou normalizada pelo lang_map
+    target_key = lang_map.get(norm_lang)
+    
+    # 2. Se não encontrou, tenta pelo prefixo de 2 letras (ex: 'en-NZ' -> 'en')
+    if not target_key and "-" in norm_lang:
+        prefix = norm_lang.split("-")[0]
+        target_key = lang_map.get(prefix)
+    
+    # 3. Tenta encontrar chave insensível a maiúsculas/minúsculas no RECOMMENDED_VOICES
+    if not target_key:
+        for k in RECOMMENDED_VOICES:
+            if k.lower() == norm_lang:
+                target_key = k
+                break
+
+    # Caso ainda não encontre, utiliza 'en-US' como fallback
+    if not target_key or target_key not in RECOMMENDED_VOICES:
+        target_key = "en-US"
+
+    voices = RECOMMENDED_VOICES[target_key]
+    return voices.get(style, voices.get("default", "en-US-ChristopherNeural"))
 
 
 def _build_ssml_for_edge(
@@ -323,4 +363,3 @@ async def list_available_voices(language: str = "en-US") -> list[dict]:
     """Lista vozes disponíveis para um idioma."""
     voices = await edge_tts.list_voices()
     return [v for v in voices if v.get("Locale", "").startswith(language)]
-

@@ -8,8 +8,10 @@ from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, F
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlmodel import Session, create_engine, select
+from sqlmodel import Session, create_engine, select, SQLModel
 from dotenv import load_dotenv
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 from cloud_hub.models import Tenant, Channel, VideoJob, AffiliateProduct, PerformanceLog
 from cloud_hub.core.intelligence import run_scout_phase, run_viral_score_phase
@@ -18,53 +20,112 @@ from cloud_hub.core.copywriter import run_copywriter_phase
 from contextlib import asynccontextmanager
 
 # =============================================================================
-# 1. LÓGICA DE INICIALIZAÇÃO AUTOMÁTICA (BOOTSTRAP)
+# 1. HASHING DE SENHAS (ARGON2ID) E BOOTSTRAP ADMINISTRATIVO CONTROLADO
 # =============================================================================
+_password_hasher = PasswordHasher()
+_ALLOWED_BOOTSTRAP_PLANS = {"free", "starter", "pro", "enterprise"}
+
+
+def hash_password(password: str) -> str:
+    """Gera hash Argon2id seguro para armazenamento de senha."""
+    if not password or not isinstance(password, str):
+        raise ValueError("Senha inválida para geração de hash.")
+    return _password_hasher.hash(password)
+
+
+def verify_password(stored_hash: Optional[str], password: str) -> bool:
+    """Verifica senha contra hash Argon2id; rejeita hash ausente ou inválido."""
+    if not stored_hash or not password:
+        return False
+    try:
+        return _password_hasher.verify(stored_hash, password)
+    except (VerifyMismatchError, InvalidHashError, VerificationError):
+        return False
+
+
+def _run_admin_bootstrap(session: Session) -> bool:
+    """
+    Executa bootstrap administrativo somente quando ENABLE_ADMIN_BOOTSTRAP=1/true
+    e com configuração explícita e validada via variáveis de ambiente.
+    """
+    enabled = (os.getenv("ENABLE_ADMIN_BOOTSTRAP") or "").strip().lower()
+    if enabled not in {"1", "true"}:
+        return False
+
+    admin_email = (os.getenv("BOOTSTRAP_ADMIN_EMAIL") or "").strip()
+    if not admin_email or "@" not in admin_email:
+        raise RuntimeError(
+            "BOOTSTRAP_ADMIN_EMAIL obrigatório e válido quando ENABLE_ADMIN_BOOTSTRAP está ativo."
+        )
+
+    admin_password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD") or ""
+    if not admin_password.strip():
+        raise RuntimeError(
+            "BOOTSTRAP_ADMIN_PASSWORD obrigatória quando ENABLE_ADMIN_BOOTSTRAP está ativo."
+        )
+
+    admin_name = (os.getenv("BOOTSTRAP_ADMIN_NAME") or "Super Admin").strip() or "Super Admin"
+    plan_type = (os.getenv("BOOTSTRAP_ADMIN_PLAN") or "free").strip().lower()
+    if plan_type not in _ALLOWED_BOOTSTRAP_PLANS:
+        raise ValueError(
+            f"BOOTSTRAP_ADMIN_PLAN inválido: '{plan_type}'. Permitidos: {sorted(_ALLOWED_BOOTSTRAP_PLANS)}"
+        )
+
+    raw_credits = (os.getenv("BOOTSTRAP_ADMIN_CREDITS") or "0").strip()
+    try:
+        credits_balance = int(raw_credits)
+    except ValueError as exc:
+        raise ValueError(f"BOOTSTRAP_ADMIN_CREDITS inválido: '{raw_credits}'") from exc
+    if credits_balance < 0:
+        raise ValueError("BOOTSTRAP_ADMIN_CREDITS não pode ser negativo.")
+
+    admin = session.exec(select(Tenant).where(Tenant.email == admin_email)).first()
+    if not admin:
+        admin = Tenant(
+            name=admin_name,
+            email=admin_email,
+            plan_type=plan_type,
+            credits_balance=credits_balance,
+            auto_approve_content=False,
+            password_hash=hash_password(admin_password),
+        )
+        session.add(admin)
+        session.commit()
+        session.refresh(admin)
+    elif not admin.password_hash:
+        raise RuntimeError(
+            "Administrador preexistente sem password_hash; não será sobrescrito silenciosamente."
+        )
+
+    create_master = (os.getenv("BOOTSTRAP_CREATE_MASTER_CHANNEL") or "").strip().lower()
+    if create_master in {"1", "true"}:
+        master_channel = session.exec(
+            select(Channel).where(
+                Channel.tenant_id == admin.id,
+                Channel.language == "en-US",
+            )
+        ).first()
+        if not master_channel:
+            new_channel = Channel(
+                tenant_id=admin.id,
+                name="Master AI Stories US",
+                niche="AI + Money + Stories",
+                language="en-US",
+                market_region="North America",
+                active=True,
+            )
+            session.add(new_channel)
+            session.commit()
+
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Este código corre sempre que a API liga na Vercel
     if engine:
         with Session(engine) as session:
-            # 1. Garantir que o Super Admin existe
-            admin_email = "derikmoretti@gmail.com"
-            admin = session.exec(select(Tenant).where(Tenant.email == admin_email)).first()
-            
-            if not admin:
-                admin = Tenant(
-                    name="Derik Moretti (Super Admin)",
-                    email=admin_email,
-                    plan_type="enterprise",
-                    credits_balance=999999,
-                    auto_approve_content=True
-                )
-                session.add(admin)
-                session.commit()
-                session.refresh(admin)
-                print(f"-> Bootstrap: Admin {admin_email} criado com sucesso.")
-
-            # 2. Garantir que o Canal Master existe para este Admin
-            master_channel = session.exec(
-                select(Channel).where(
-                    Channel.tenant_id == admin.id,
-                    Channel.language == "en-US"
-                )
-            ).first()
-
-            if not master_channel:
-                new_channel = Channel(
-                    tenant_id=admin.id,
-                    name="Master AI Stories US",
-                    niche="AI + Money + Stories",
-                    language="en-US",
-                    market_region="North America",
-                    active=True
-                )
-                session.add(new_channel)
-                session.commit()
-                print("-> Bootstrap: Canal Master Inglês configurado.")
-    
-    yield # O servidor continua a correr normalmente
-    # Lógica de encerramento (se necessário) pode vir aqui
+            _run_admin_bootstrap(session)
+    yield
 
 # =============================================================================
 # 2. INICIALIZAÇÃO DA APLICAÇÃO (Ligando o lifespan)
@@ -85,8 +146,23 @@ if DATABASE_URL and "sslmode=" not in DATABASE_URL:
     separator = "&" if "?" in DATABASE_URL else "?"
     DATABASE_URL += f"{separator}sslmode=require"
 
-# Se o DATABASE_URL existir, cria o motor, senão deixa None (útil para build na Vercel)
-engine = create_engine(DATABASE_URL) if DATABASE_URL else None
+def create_resilient_engine():
+    if DATABASE_URL:
+        try:
+            eng = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+            with eng.connect() as conn:
+                pass
+            return eng
+        except Exception as exc:
+            print(f"⚠️ [CloudHub] Banco de dados remoto indisponível ({exc}). Ativando fallback para SQLite local...")
+    
+    sqlite_path = os.path.abspath("output/logs/factory.db")
+    os.makedirs(os.path.dirname(sqlite_path), exist_ok=True)
+    eng = create_engine(f"sqlite:///{sqlite_path}", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(eng)
+    return eng
+
+engine = create_resilient_engine()
 
 def get_session():
     if not engine:
@@ -107,11 +183,16 @@ templates_path = os.path.join(BASE_DIR, "templates")
 templates = Jinja2Templates(directory=templates_path)
 
 def get_current_tenant(request: Request, session: Session = Depends(get_session)) -> Tenant:
-    tenant_id = request.cookies.get("session_tenant_id")
+    tenant_id = request.cookies.get("session_tenant_id") or request.headers.get("X-Tenant-ID")
     if not tenant_id:
         raise HTTPException(status_code=401, detail="Não autenticado")
     
-    tenant = session.get(Tenant, UUID(tenant_id))
+    try:
+        tenant_uuid = UUID(str(tenant_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=401, detail="Identificador de sessão inválido")
+
+    tenant = session.get(Tenant, tenant_uuid)
     if not tenant:
         raise HTTPException(status_code=401, detail="Sessão inválida")
     return tenant
@@ -119,9 +200,14 @@ def get_current_tenant(request: Request, session: Session = Depends(get_session)
 # Super Admin fallback (Basic Auth)
 security = HTTPBasic()
 def authenticate_admin(credentials: HTTPBasicCredentials = Depends(security)):
-    correct_user = os.getenv("ADMIN_USER", "derik_admin")
-    correct_pass = os.getenv("ADMIN_PASS", "senha_temporaria_123")
-    if not (secrets.compare_digest(credentials.username, correct_user) and 
+    correct_user = os.getenv("ADMIN_USER")
+    correct_pass = os.getenv("ADMIN_PASS")
+    if not correct_user or not correct_pass:
+        raise HTTPException(
+            status_code=503,
+            detail="Autenticação administrativa não configurada no ambiente",
+        )
+    if not (secrets.compare_digest(credentials.username, correct_user) and
             secrets.compare_digest(credentials.password, correct_pass)):
         raise HTTPException(status_code=401, detail="Credenciais Inválidas", headers={"WWW-Authenticate": "Basic"})
     return credentials.username
@@ -173,13 +259,11 @@ def login_action(response: Response, username: str = Form(...), password: str = 
     # Busca Tenant por email
     tenant = session.exec(select(Tenant).where(Tenant.email == username)).first()
     
-    # IMPORTANTE: Em produção, usar password_hash. Aqui simplificado para o MVP do usuário.
-    if tenant:
-        # Se for o admin inicial sem senha, permite entrar (ou valida contra senha_temporaria)
-        if tenant.password_hash is None or password == "senha_temporaria_123":
-            resp = RedirectResponse(url="/", status_code=303)
-            resp.set_cookie(key="session_tenant_id", value=str(tenant.id))
-            return resp
+    # Fail-closed: exige hash Argon2id válido (sem senha padrão ou texto puro)
+    if tenant and verify_password(tenant.password_hash, password):
+        resp = RedirectResponse(url="/", status_code=303)
+        resp.set_cookie(key="session_tenant_id", value=str(tenant.id))
+        return resp
             
     return RedirectResponse(url="/login?error=1", status_code=303)
 
@@ -340,12 +424,16 @@ def update_roi(video_uuid: UUID, value: float, session: Session):
 # =============================================================================
 
 @app.post("/admin/trigger-scout/{channel_id}", tags=["Intelligence"])
-async def trigger_scout(channel_id: UUID, session: Session = Depends(get_session)):
+async def trigger_scout(
+    channel_id: UUID, 
+    production_profile: Optional[str] = None, 
+    session: Session = Depends(get_session)
+):
     channel = session.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
         
-    job = await run_scout_phase(session, channel)
+    job = await run_scout_phase(session, channel, production_profile=production_profile)
     score = await run_viral_score_phase(session, job)
     
     if score < 70:
@@ -357,7 +445,95 @@ async def trigger_scout(channel_id: UUID, session: Session = Depends(get_session
         "status": "success", 
         "job_id": job.id, 
         "topic": job.topic, 
-        "affiliate": job.injected_affiliate_url
+        "affiliate": job.injected_affiliate_url,
+        "production_profile": job.production_profile
+    }
+
+from pydantic import BaseModel, Field
+
+class JobCreateRequest(BaseModel):
+    channel_id: UUID
+    topic: str
+    production_profile: Optional[str] = None
+    video_type: str = "LONG"
+    video_director_mode: Optional[str] = None
+
+@app.post("/jobs/create", tags=["Jobs"])
+def create_video_job(
+    payload: JobCreateRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: Session = Depends(get_session)
+):
+    # 1. Validação de campos obrigatórios e sanitização
+    clean_topic = payload.topic.strip()
+    if not clean_topic:
+        raise HTTPException(status_code=400, detail="O campo 'topic' não pode ser vazio")
+
+    clean_video_type = payload.video_type.strip().upper()
+    if clean_video_type not in ["LONG", "SHORT"]:
+        raise HTTPException(status_code=400, detail="O campo 'video_type' deve ser 'LONG' ou 'SHORT'")
+
+    # 2. Validação estrita de production_profile
+    validated_profile = None
+    if payload.production_profile is not None:
+        raw_prof = str(payload.production_profile).strip().upper()
+        if raw_prof:
+            from shared.production_profiles import PROFILES, _PROFILE_ALIASES
+            resolved_key = _PROFILE_ALIASES.get(raw_prof, raw_prof)
+            if resolved_key not in PROFILES:
+                valid_profiles = list(PROFILES.keys())
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Perfil de produção inválido: '{payload.production_profile}'. Valores permitidos: {valid_profiles}"
+                )
+            validated_profile = resolved_key
+
+    # 2.5 Validação estrita de video_director_mode
+    validated_director_mode = None
+    if payload.video_director_mode is not None:
+        from cloud_hub.core.video_director_integration import (
+            InvalidVideoDirectorModeError,
+            _normalize_mode_value,
+        )
+        try:
+            validated_director_mode = _normalize_mode_value(payload.video_director_mode, "request")
+        except InvalidVideoDirectorModeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    # 3. Autorização e Isolamento Multitenant (Proteção contra criação em nome de terceiros)
+    channel = session.get(Channel, payload.channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Canal não encontrado")
+
+    is_super_admin = (tenant.email == "derikmoretti@gmail.com")
+    if channel.tenant_id != tenant.id and not is_super_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Não autorizado: o canal especificado não pertence à sua organização"
+        )
+
+    # 4. Criação e persistência do job
+    job = VideoJob(
+        channel_id=channel.id,
+        topic=clean_topic,
+        video_type=clean_video_type,
+        production_profile=validated_profile,
+        video_director_mode=validated_director_mode,
+        status="APPROVED",
+        target_language=channel.language,
+        is_master=True
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return {
+        "status": "success",
+        "job_id": job.id,
+        "topic": job.topic,
+        "production_profile": job.production_profile,
+        "video_type": job.video_type,
+        "channel_id": job.channel_id,
+        "tenant_id": tenant.id
     }
 
 @app.post("/admin/diagnose-and-model/{job_id}", tags=["Optimization"])
@@ -430,7 +606,8 @@ def auto_scale_top_20_percent(tenant_id: UUID, session: Session = Depends(get_se
                 is_master=False,
                 parent_job_id=master.id,
                 target_language=clone_channel.language,
-                script_data=master.script_data 
+                script_data=master.script_data,
+                production_profile=master.production_profile
             )
             session.add(new_job)
             clones_created += 1
@@ -478,7 +655,8 @@ def validate_and_clone_video(job_id: UUID, session: Session = Depends(get_sessio
             is_master=False,
             parent_job_id=master_job.id,
             target_language=clone_channel.language,
-            script_data=master_job.script_data 
+            script_data=master_job.script_data,
+            production_profile=master_job.production_profile
         )
         session.add(new_job)
         cloned_jobs.append(new_job)
@@ -527,7 +705,9 @@ def get_next_job(market_region: str, session: Session = Depends(get_session)):
         "script_data": job.script_data,
         "thumbnail_data": job.thumbnail_data,
         "injected_url": job.injected_affiliate_url,
-        "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None
+        "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
+        "video_type": job.video_type,
+        "production_profile": getattr(job, "production_profile", None),
     }
 
 @app.post("/worker/report-status/{job_id}", tags=["Worker"])

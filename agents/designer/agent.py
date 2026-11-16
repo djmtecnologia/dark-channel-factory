@@ -1,140 +1,68 @@
-"""
-Designer Agent — Dark Channel Factory
-Agent 4: Gera 3 variantes de thumbnail (A/B/C) para teste de CTR.
-Publica ThumbnailData que o Manager Agent consolida com VideoData.
-"""
+"""Designer Agent: conceitos Ollama + imagens Hugging Face + texto Pillow."""
 from __future__ import annotations
 
 import json
 import os
 from uuid import UUID
 
-from dotenv import load_dotenv
-
-from agents.designer.prompts import THUMBNAIL_SYSTEM_PROMPT, THUMBNAIL_USER_PROMPT_TEMPLATE
 from agents.designer.thumbnail_generator import generate_thumbnail_variants
 from orchestrator.queue_manager import QUEUE_UPLOAD, get_queue_manager
-from shared.llm_client import get_llm_client
 from shared.logger import get_logger
 from shared.models import ScriptData, ThumbnailData, ThumbnailVariant
+from shared.ollama_client import get_ollama_client
 
-load_dotenv()
 logger = get_logger(__name__)
 
 
 def run_designer_agent(script_data_dict: dict) -> ThumbnailData:
-    """
-    Executa o Designer Agent.
-    Gera 3 variantes de thumbnail e tenta consolidar com VideoData no Manager.
-
-    Args:
-        script_data_dict: ScriptData serializado como dict
-    """
-    script_data = ScriptData(**script_data_dict)
-    job_id = script_data.job_id
-
-    logger.info(f"🎨 [Designer] Starting | job={job_id}")
-
-    llm = get_llm_client()
-
-    # ── Step 1: Gerar prompts via LLM ─────────────────────────
-    user_prompt = THUMBNAIL_USER_PROMPT_TEMPLATE.format(
-        title=script_data.title,
-        dominant_color=script_data.thumbnail_dominant_color,
-        thumbnail_brief=script_data.thumbnail_brief,
-        primary_keyword=script_data.niche_data.primary_keyword,
-    )
-
-    variant_prompts = None
+    script = ScriptData(**script_data_dict)
+    concepts = None
     try:
-        logger.info("🤖 [Designer] Generating thumbnail prompts via LLM...")
-        llm_response = llm.complete(
-            system_prompt=THUMBNAIL_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            temperature=0.9,
-            max_tokens=2048,
-            json_mode=True,
+        concepts = get_ollama_client().chat_json(
+            "You design high-CTR YouTube thumbnails. Return JSON only.",
+            f"""Create 3 distinct background concepts for this title: {script.title}
+Language: {script.language}
+Brief: {script.thumbnail_brief}
+Return {{"variants":[{{"prompt":"English image prompt, no text"}}, ...]}}.
+Reserve the upper area for title overlay and forbid letters and watermarks.""",
+            temperature=0.65,
+            num_predict=1000,
         )
-        raw = llm_response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        variant_prompts = json.loads(raw)
-        logger.info("✓ [Designer] Thumbnail prompts generated")
-    except Exception as e:
-        logger.warning(f"[Designer] LLM prompt generation failed: {e} — using defaults")
+    except Exception as exc:
+        logger.warning("[Designer] Conceitos Ollama falharam; usando briefs padrão: %s", exc)
 
-    # ── Step 2: Gerar thumbnails ───────────────────────────────
-    logger.info("🖼️ [Designer] Generating thumbnail images...")
-    variants_data = generate_thumbnail_variants(
-        job_id=job_id,
-        title=script_data.title,
-        thumbnail_brief=script_data.thumbnail_brief,
-        dominant_color=script_data.thumbnail_dominant_color,
-        primary_keyword=script_data.niche_data.primary_keyword,
-        variant_prompts=variant_prompts,
+    variants = generate_thumbnail_variants(
+        job_id=script.job_id,
+        title=script.title,
+        thumbnail_brief=script.thumbnail_brief,
+        dominant_color=script.thumbnail_dominant_color,
+        primary_keyword=script.niche_data.primary_keyword,
+        variant_prompts=concepts,
     )
-
-    # ── Step 3: Construir ThumbnailData ───────────────────────
-    thumbnail_data = ThumbnailData(
-        job_id=job_id,
-        variants=[ThumbnailVariant(**v) for v in variants_data],
+    result = ThumbnailData(
+        job_id=script.job_id,
+        variants=[ThumbnailVariant(**item) for item in variants],
         active_variant="A",
     )
-
-    logger.info(
-        f"✅ [Designer] ThumbnailData ready | variants={len(thumbnail_data.variants)} | "
-        f"active={thumbnail_data.active_variant}"
-    )
-
-    # ── Step 4: Armazenar no Redis e tentar consolidar ─────────
-    _store_thumbnail_data(thumbnail_data)
-    _try_trigger_upload(job_id, script_data)
-
-    return thumbnail_data
+    _store_thumbnail_data(result)
+    _try_trigger_upload(script.job_id)
+    return result
 
 
-def _store_thumbnail_data(thumbnail_data: ThumbnailData) -> None:
-    """Armazena ThumbnailData no Redis."""
+def _redis():
     import redis
-    import json
+    return redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    r = redis.from_url(redis_url)
 
-    key = f"thumbnail_data:{thumbnail_data.job_id}"
-    r.setex(
-        key,
+def _store_thumbnail_data(data: ThumbnailData) -> None:
+    _redis().setex(
+        f"thumbnail_data:{data.job_id}",
         86400,
-        json.dumps(thumbnail_data.model_dump(mode="json"), default=str)
+        json.dumps(data.model_dump(mode="json"), default=str),
     )
-    logger.debug(f"ThumbnailData stored in Redis key: {key}")
 
 
-def _try_trigger_upload(job_id: UUID, script_data: ScriptData) -> None:
-    """
-    Tenta iniciar upload assim que Video E Thumbnail estão prontos.
-    Verifica Redis para ver se VideoData já existe.
-    """
-    import redis
-    import json
-
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    r = redis.from_url(redis_url)
-
-    video_key = f"video_data:{job_id}"
-    video_raw = r.get(video_key)
-
-    if video_raw:
-        logger.info(f"✅ [Designer] VideoData found in Redis — triggering upload!")
+def _try_trigger_upload(job_id: UUID) -> None:
+    if _redis().get(f"video_data:{job_id}"):
         from agents.manager_analyst.agent import run_upload_agent
-        qm = get_queue_manager()
-        qm.enqueue(
-            QUEUE_UPLOAD,
-            run_upload_agent,
-            str(job_id),
-            job_timeout=1800,
-        )
-    else:
-        logger.info(f"⏳ [Designer] VideoData not yet ready — upload will be triggered by VideoEditor")
+        get_queue_manager().enqueue(QUEUE_UPLOAD, run_upload_agent, str(job_id), job_timeout=1800)

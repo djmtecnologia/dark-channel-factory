@@ -69,6 +69,9 @@ def fetch_video_clip(
     video_dir.mkdir(parents=True, exist_ok=True)
 
     output_path = video_dir / f"scene_{scene_id:03d}_broll.mp4"
+    if output_path.exists() and output_path.stat().st_size > 0:
+        logger.info(f"♻️ Reusing matrix B-roll for scene_{scene_id}: {output_path}")
+        return str(output_path)
 
     # ── Step 0: Tentar Cache Local ─────────────────────────────
     local_clips = _get_local_cache_clips()
@@ -223,7 +226,7 @@ def fetch_all_broll(scenes: list[dict], job_id: UUID) -> dict[int, str | None]:
 
     for scene in scenes:
         scene_id = scene["id"]
-        query = scene.get("b_roll_query", "technology office")
+        query = scene.get("b_roll_visual") or scene.get("b_roll_query") or "technology office"
         path = fetch_video_clip(query=query, job_id=job_id, scene_id=scene_id)
         results[scene_id] = path
         time.sleep(0.1)  # Menos delay se estiver em cache
@@ -231,4 +234,3 @@ def fetch_all_broll(scenes: list[dict], job_id: UUID) -> dict[int, str | None]:
     downloaded = sum(1 for p in results.values() if p)
     logger.info(f"✅ B-roll: {downloaded}/{len(scenes)} clips ready")
     return results
-

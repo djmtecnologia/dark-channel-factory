@@ -85,11 +85,6 @@ class LLMClient:
             except ImportError:
                 logger.warning("openai not installed — OpenAI unavailable")
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-    )
     def complete(
         self,
         system_prompt: str,
@@ -97,49 +92,115 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         json_mode: bool = False,
+        timeout: float | None = None,
     ) -> LLMResponse:
         """
         Chama o LLM com cascata automática.
         Se MOCK_LLM=true, retorna resposta mock para testes.
+        Quando ``timeout`` é informado, impõe um deadline global (``time.monotonic() + timeout``)
+        sobre toda a cascata e retries, propagando o tempo restante a cada chamada.
         """
         if MOCK_LLM:
             return self._mock_response(user_prompt)
 
+        deadline = (time.monotonic() + timeout) if timeout is not None else None
+        max_attempts = 3
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"LLMClient.complete exceeded deadline of {timeout:.2f}s")
+
+            try:
+                return self._complete_cascade(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                    deadline=deadline,
+                    total_timeout=timeout,
+                )
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    raise
+
+                backoff = min(30.0, max(2.0, float(2 ** (attempt - 1))))
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or backoff >= remaining:
+                        raise TimeoutError(
+                            f"LLMClient.complete exceeded deadline of {timeout:.2f}s before retry"
+                        ) from exc
+                    time.sleep(backoff)
+                else:
+                    time.sleep(backoff)
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("LLMClient.complete failed without exception")
+
+    def _complete_cascade(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+        deadline: float | None,
+        total_timeout: float | None,
+    ) -> LLMResponse:
+        def _remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError(f"LLMClient.complete exceeded deadline of {total_timeout:.2f}s")
+            return rem
+
         # Tentativa 1: Gemini Primary
         if self._gemini_client:
+            rem = _remaining_timeout()
             try:
                 return self._call_gemini(
-                    GEMINI_PRIMARY, system_prompt, user_prompt, temperature, max_tokens, json_mode
+                    GEMINI_PRIMARY, system_prompt, user_prompt, temperature, max_tokens, json_mode, timeout=rem
                 )
             except Exception as e:
                 logger.warning(f"Gemini primary ({GEMINI_PRIMARY}) failed: {e}")
 
         # Tentativa 2: DeepSeek (Custo-benefício imbatível)
         if self._deepseek_client:
+            rem = _remaining_timeout()
             try:
-                # Usa deepseek-chat por padrão
                 model = "deepseek-chat"
                 return self._call_openai(
-                    model, system_prompt, user_prompt, temperature, max_tokens, json_mode, client=self._deepseek_client
+                    model, system_prompt, user_prompt, temperature, max_tokens, json_mode, client=self._deepseek_client, timeout=rem
                 )
             except Exception as e:
                 logger.warning(f"DeepSeek failed: {e}")
 
         # Tentativa 3: Gemini Fallback
         if self._gemini_client:
+            rem = _remaining_timeout()
             try:
                 return self._call_gemini(
-                    GEMINI_FALLBACK, system_prompt, user_prompt, temperature, max_tokens, json_mode
+                    GEMINI_FALLBACK, system_prompt, user_prompt, temperature, max_tokens, json_mode, timeout=rem
                 )
             except Exception as e:
                 logger.warning(f"Gemini fallback ({GEMINI_FALLBACK}) failed: {e}")
 
         # Tentativa 4: OpenAI (Final fallback)
         if self._openai_client:
+            rem = _remaining_timeout()
             try:
                 return self._call_openai(
-                    OPENAI_FALLBACK, system_prompt, user_prompt, temperature, max_tokens, json_mode
+                    OPENAI_FALLBACK, system_prompt, user_prompt, temperature, max_tokens, json_mode, timeout=rem
                 )
+            except TimeoutError:
+                raise
             except Exception as e:
                 logger.error(f"OpenAI fallback also failed: {e}")
                 raise RuntimeError("All LLM providers failed") from e
@@ -156,6 +217,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         json_mode: bool,
+        timeout: float | None = None,
     ) -> LLMResponse:
         import requests
         
@@ -178,9 +240,10 @@ class LLMClient:
         }
         
         headers = {"Content-Type": "application/json"}
+        req_timeout = timeout if timeout is not None else 120
         
         try:
-            response = requests.post(url, json=payload, headers=headers)
+            response = requests.post(url, json=payload, headers=headers, timeout=req_timeout)
             
             if response.status_code != 200:
                 raise Exception(f"Gemini API Error {response.status_code}: {response.text}")
@@ -204,7 +267,8 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         json_mode: bool,
-        client = None
+        client = None,
+        timeout: float | None = None,
     ) -> LLMResponse:
         # Usa o cliente fornecido (DeepSeek) ou o padrão (OpenAI)
         target_client = client if client else self._openai_client
@@ -218,6 +282,8 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
@@ -287,17 +353,30 @@ def get_llm_client() -> LLMClient:
 
 from shared.ai_orchestrator import orchestrator
 
-def get_completion(prompt: str, system_instruction: str = "", model_choice: str = "gemini", json_mode: bool = False, max_tokens: int = 4096) -> str:
+def get_completion(
+    prompt: str,
+    system_instruction: str = "",
+    model_choice: str = "gemini",
+    json_mode: bool = False,
+    max_tokens: int = 4096,
+    task_type: str = "general",  # "general" | "code" | "vision" | "video"
+) -> str:
     """
     Função de conveniência que utiliza o AIOrchestrator (Arquiteto Tier List).
-    Ignora model_choice para seguir a política de contingência 100% disponível.
+    
+    task_type controla qual modelo Ollama local é usado como último fallback:
+      - "code"   → qwen2.5-coder  (programação de alto nível)
+      - "vision" → llava           (visão computacional / imagens)
+      - "video"  → gemma2          (roteiros e narrativas de vídeo)
+      - "general"→ qwen2.5-coder  (padrão)
     """
     try:
         response = orchestrator.chat_completion(
             system_prompt=system_instruction,
             user_prompt=prompt,
             json_mode=json_mode,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            task_type=task_type,
         )
         return response.text
     except Exception as e:

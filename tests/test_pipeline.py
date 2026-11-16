@@ -14,9 +14,10 @@ os.environ["DRY_RUN"] = "true"
 
 class TestScoutAgent(unittest.TestCase):
 
+    @patch("agents.scout_miner.agent.get_llm_client")
     @patch("agents.scout_miner.youtube_trends.collect_trend_data")
-    def test_scout_returns_niche_data(self, mock_trends):
-        """Test that Scout Agent returns valid NicheData."""
+    def test_scout_returns_niche_data(self, mock_trends, mock_get_llm):
+        """Test that Scout Agent returns valid NicheData with deterministic LLM mock."""
         mock_trends.return_value = {
             "trending_queries": {"rising": ["AI tools 2025", "ChatGPT automation"], "top": []},
             "competition_analysis": [],
@@ -24,6 +25,22 @@ class TestScoutAgent(unittest.TestCase):
             "target_region": "US",
             "language": "en-US",
         }
+        mock_llm = MagicMock()
+        mock_llm.complete.return_value = MagicMock(
+            text=json.dumps({
+                "topic": "AI Automation Tools for Small Businesses in 2025",
+                "primary_keyword": "AI automation tools",
+                "secondary_keywords": ["ChatGPT automation", "AI workflow"],
+                "lsi_keywords": ["productivity", "no-code AI"],
+                "angle": "practical tutorial",
+                "content_gap": "Step-by-step ROI breakdown",
+                "target_audience": "small business owners",
+                "estimated_cpm_usd": 28.5,
+                "niche_score": 88,
+                "competition_level": "medium",
+            })
+        )
+        mock_get_llm.return_value = mock_llm
 
         # Mock the queue enqueue
         with patch("agents.scout_miner.agent.get_queue_manager") as mock_qm:
@@ -33,10 +50,24 @@ class TestScoutAgent(unittest.TestCase):
             result = run_scout_agent(str(uuid4()), "ai_tools_us", False)
 
             self.assertIsNotNone(result)
-            self.assertIsNotNone(result.topic)
-            self.assertIsNotNone(result.primary_keyword)
-            self.assertGreater(result.niche_score, 0)
+            self.assertEqual(result.topic, "AI Automation Tools for Small Businesses in 2025")
+            self.assertEqual(result.primary_keyword, "AI automation tools")
+            self.assertEqual(result.niche_score, 88)
+            mock_llm.complete.assert_called_once()
             print(f"✅ Scout result: {result.topic}")
+
+    @patch("agents.scout_miner.youtube_trends.collect_trend_data")
+    @patch("agents.scout_miner.agent.get_llm_client")
+    def test_scout_raises_when_no_llm_clients(self, mock_get_llm, mock_trends):
+        """Test that Scout Agent propagates RuntimeError when no LLM clients are available."""
+        mock_get_llm.side_effect = RuntimeError(
+            "No LLM clients available. Check GEMINI_API_KEY, DEEPSEEK_API_KEY or OPENAI_API_KEY in .env"
+        )
+        from agents.scout_miner.agent import run_scout_agent
+        with self.assertRaises(RuntimeError) as ctx:
+            run_scout_agent(str(uuid4()), "ai_tools_us", False)
+        self.assertIn("No LLM clients available", str(ctx.exception))
+        mock_trends.assert_not_called()
 
     def test_trend_data_collection_mock(self):
         """Test trend data collection with no API key."""
