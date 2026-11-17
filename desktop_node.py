@@ -1641,8 +1641,19 @@ def assemble_production(job_id, video_paths, audio_path, srt_path, topic, clip_d
         
         # Efeito Visual de Acordo com Posição da Cena
         is_hook_scene = (i < 3 and not is_short) or (i == 0 and is_short)  # Hook de vídeo longo ou primeira cena do Short
-        
-        if is_image:
+
+        # Sprint 2.6 (Tarefa 3): Camera Engine para cenas dirigidas pelo MasterAVPlan
+        scene_directions = job_data.get("_scene_directions", []) if job_data else []
+        director_fx = None
+        if i < len(scene_directions) and scene_directions[i] is not None:
+            from desktop_worker.director_camera_engine import resolve_scene_camera_filter
+            director_fx = resolve_scene_camera_filter(
+                scene_directions[i], duration_sec=dur, width=w, height=h, fps=30, is_image=is_image
+            )
+
+        if director_fx:
+            visual_fx = director_fx
+        elif is_image:
             if is_hook_scene:
                 # HOOK: Ken Burns acelerado (zoom-in rápido)
                 visual_fx = f"scale=4000:-1,zoompan=z='min(zoom+0.004,1.6)':d={num_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30,trim=duration={dur}"
@@ -2074,6 +2085,17 @@ def render_video(job_data):
         # Normalização universal do contrato de cenas (suporta b_roll_visual, b_roll_query, narration, text)
         from shared.scene_normalizer import normalize_scenes
         scenes_list = normalize_scenes(script_obj.get("scenes", []), fallback_topic=topic)
+
+        # Sprint 2.6 (Tarefa 2): Interpretação única do MasterAVPlan por job (stateless e segura)
+        from desktop_worker.director_media_router import (
+            interpret_director_plan_safe,
+            build_scene_direction_index,
+            resolve_scene_direction,
+            build_hook_prompt,
+            select_media_with_direction,
+        )
+        director_plan = interpret_director_plan_safe(script_obj)
+        dir_by_scene_id, dir_by_order = build_scene_direction_index(director_plan)
         
         # Extract per-scene visual_cues from Retention Engine output for micro-pacing
         scene_visual_cues = []
@@ -2121,38 +2143,77 @@ def render_video(job_data):
             )
             sfx_cue = scene.get("sfx_cue", "none")
             scene_text = scene.get("narration") or scene.get("text", "")
+            scene_direction = resolve_scene_direction(
+                director_plan, dir_by_scene_id, dir_by_order, scene, scene_index
+            )
             
             # ─── 1. HOOK QUALITY ENGINE: Cena 0 ultra impactante ───
+            hook_prompt = None
             if scene_index == 0:
-                print(f"🔥 [HOOK ENGINE] Gerando visual dramático sob medida para o gancho do vídeo (Tópico: '{topic}')")
-                
-                # Criar prompt artístico dramático
-                hook_prompt = f"A dramatic cinematic premium illustration representing: '{topic}', hyper-realistic key art, epic style, intense red glowing accent lights, high contrast, masterpiece, trending on artstation"
-                
-                # Nome de arquivo seguro para o hook
-                safe_topic_id = hashlib.md5(topic.encode()).hexdigest()[:12]
-                hook_path = os.path.join(ASSETS_CACHE, f"hook_scene_{safe_topic_id}.jpg")
-                
-                success = False
-                if os.path.exists(hook_path) and os.path.getsize(hook_path) > 15000:
-                    success = True
-                    print(f"✅ [HOOK ENGINE] Usando imagem do gancho já existente no cache: {hook_path}")
+                if scene_direction is None:
+                    print(f"🔥 [HOOK ENGINE] Gerando visual dramático sob medida para o gancho do vídeo (Tópico: '{topic}')")
+                    legacy_hook_prompt, _ = build_hook_prompt(
+                        topic=topic,
+                        scene=scene,
+                        scene_direction=None,
+                        global_style=None,
+                    )
+                    safe_topic_id = hashlib.md5(topic.encode()).hexdigest()[:12]
+                    hook_path = os.path.join(ASSETS_CACHE, f"hook_scene_{safe_topic_id}.jpg")
+
+                    success = False
+                    if os.path.exists(hook_path) and os.path.getsize(hook_path) > 15000:
+                        success = True
+                        print(f"✅ [HOOK ENGINE] Usando imagem do gancho já existente no cache: {hook_path}")
+                    else:
+                        success = generate_pollinations_image(legacy_hook_prompt, hook_path)
+
+                    if success:
+                        used_assets.add(hook_path)
+                        p_sfx = fetch_sfx("cinematic impact") or fetch_sfx("impact")
+                        assigned_paths.append(hook_path)
+                        return hook_path, p_sfx
+                    else:
+                        print("⚠️ [HOOK ENGINE] Falha ao gerar via Pollinations. Caindo para busca padrão.")
                 else:
-                    success = generate_pollinations_image(hook_prompt, hook_path)
-                    
-                if success:
-                    used_assets.add(hook_path)
-                    # Força SFX de Impacto Dramático no Hook!
-                    p_sfx = fetch_sfx("cinematic impact") or fetch_sfx("impact")
-                    assigned_paths.append(hook_path)
-                    return hook_path, p_sfx
-                else:
-                    print("⚠️ [HOOK ENGINE] Falha ao gerar via Pollinations. Caindo para busca padrão.")
+                    # Director habilitado: constrói hook_prompt e delega ao roteador de mídia
+                    # para respeitar visual_production_type e hierarquia de custo.
+                    hook_prompt, _ = build_hook_prompt(
+                        topic=topic,
+                        scene=scene,
+                        scene_direction=scene_direction,
+                        global_style=director_plan.global_style if director_plan.enabled else None,
+                    )
 
             # ─── 2. BUSCA NORMAL DE MÍDIA ───
             p_visual = None
             is_hook = (scene_index < 3 and not job_data.get("is_short", False))
-            if is_hook:
+            if scene_direction is not None:
+                def _find_local_cache(kw, used_set):
+                    import re
+                    clean_kw_local = re.sub(r'[^\w\s]', '', kw.lower())
+                    words_local = [w for w in clean_kw_local.split() if w not in {"a","an","the","and","or","of","with","in","on","at"}]
+                    api_query_local = " ".join(words_local[:4]) if words_local else kw
+                    safe_id_local = hashlib.md5(api_query_local.encode()).hexdigest()[:12]
+                    cached_exact_local = os.path.join(ASSETS_CACHE, f"asset_{safe_id_local}.mp4")
+                    if os.path.exists(cached_exact_local) and cached_exact_local not in used_set:
+                        used_set.add(cached_exact_local)
+                        return cached_exact_local
+                    return None
+
+                p_visual, _route_strategy = select_media_with_direction(
+                    visual_kw=visual_kw,
+                    scene_text=scene_text,
+                    scene_index=scene_index,
+                    scene_direction=scene_direction,
+                    used_assets=used_assets,
+                    assets_cache_dir=ASSETS_CACHE,
+                    fetch_broll_fn=fetch_premium_broll,
+                    generate_pollinations_fn=generate_pollinations_image,
+                    find_local_cache_fn=_find_local_cache,
+                    hook_prompt=hook_prompt,
+                )
+            elif is_hook:
                 import re, glob
                 clean_kw = re.sub(r'[^\w\s]', '', visual_kw.lower())
                 words = [w for w in clean_kw.split() if w not in {"a","an","the","and","or","of","with","in","on","at"}]
@@ -2414,6 +2475,13 @@ def render_video(job_data):
         # Inject visual cues into job_data so assemble_production can read them
         # scene_visual_cues is aligned with cenas[] after pacing/dedup expansion
         job_data["_scene_visual_cues"] = scene_visual_cues
+
+        # Sprint 2.6 (Tarefa 3): Injeta direções cinematográficas por cena (apenas quando Director ativo)
+        if director_plan.enabled:
+            job_data["_scene_directions"] = [
+                resolve_scene_direction(director_plan, dir_by_scene_id, dir_by_order, s, idx)
+                for idx, s in enumerate(scenes_list)
+            ]
 
         if not assemble_production(
             job_id, cenas, audio_path, srt_path, topic, clip_durations, total_audio_sec,
