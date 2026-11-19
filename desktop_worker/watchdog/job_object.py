@@ -9,13 +9,16 @@ handle management.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import sys
 import time
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Mapping, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -23,6 +26,7 @@ from typing import Any, List, Optional
 # ---------------------------------------------------------------------------
 
 CREATE_SUSPENDED = 0x00000004
+CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 CREATE_NO_WINDOW = 0x08000000
 
@@ -291,6 +295,12 @@ class Win32Api:
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
         k32.CloseHandle.restype = wintypes.BOOL
 
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+
+        k32.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+        k32.OpenJobObjectW.restype = wintypes.HANDLE
+
         k32.GetProcessTimes.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(wintypes.FILETIME),
@@ -333,6 +343,7 @@ class Win32Api:
         command_line: str,
         working_dir: Optional[str] = None,
         creation_flags: int = 0,
+        env: Optional[Mapping[str, str]] = None,
     ) -> Optional[PROCESS_INFORMATION]:
         if creation_flags & CREATE_BREAKAWAY_FROM_JOB:
             raise ValueError("CREATE_BREAKAWAY_FROM_JOB is forbidden in creation_flags.")
@@ -343,6 +354,12 @@ class Win32Api:
 
         cmd_buf = ctypes.create_unicode_buffer(command_line)
         flags = creation_flags | CREATE_SUSPENDED
+        env_buf = None
+        if env is not None:
+            flags |= CREATE_UNICODE_ENVIRONMENT
+            sorted_items = sorted(env.items(), key=lambda kv: kv[0].casefold())
+            block = "\0".join(f"{k}={v}" for k, v in sorted_items) + "\0\0"
+            env_buf = ctypes.create_unicode_buffer(block)
 
         ok = self._kernel32.CreateProcessW(
             None,
@@ -351,7 +368,7 @@ class Win32Api:
             None,
             False,
             flags,
-            None,
+            env_buf,
             working_dir,
             ctypes.byref(startup_info),
             ctypes.byref(proc_info),
@@ -685,21 +702,35 @@ class ManagedJobProcess:
         if self._closed:
             return
         first_exc: Optional[BaseException] = None
+        has_pending_handles = False
         for attr in ("thread_handle", "process_handle", "job_handle"):
             handle = getattr(self.identity, attr, None)
             if handle:
                 try:
-                    self._api.close_handle(handle)
+                    ok = self._api.close_handle(handle)
                 except Exception as exc:
                     # Preserve handle reference on failure; Win32 CloseHandle
                     # failure leaves handle state indeterminate.
+                    has_pending_handles = True
                     if first_exc is None:
                         first_exc = exc
                 else:
-                    setattr(self.identity, attr, None)
+                    if ok:
+                        setattr(self.identity, attr, None)
+                    else:
+                        has_pending_handles = True
+                        get_err = getattr(self._api, "get_last_error", None)
+                        err = get_err() if callable(get_err) else None
+                        logger.warning(
+                            "CloseHandle returned False for %s (handle=%s, win32_err=%s)",
+                            attr,
+                            handle,
+                            err,
+                        )
         if first_exc is not None:
             raise first_exc
-        self._closed = True
+        if not has_pending_handles:
+            self._closed = True
 
     def __enter__(self) -> ManagedJobProcess:
         return self
@@ -768,6 +799,8 @@ class JobObjectProcessManager:
         working_dir: Optional[str] = None,
         creation_flags: int = 0,
         process_name: Optional[str] = None,
+        env: Optional[Mapping[str, str]] = None,
+        pre_resume_hook: Optional[Callable[[ProcessIdentity], None]] = None,
     ) -> LaunchResult:
         """Execute the mandatory 8-step secure Job Object launch sequence."""
         if creation_flags & CREATE_BREAKAWAY_FROM_JOB:
@@ -820,6 +853,7 @@ class JobObjectProcessManager:
                 command_line=command_line,
                 working_dir=working_dir,
                 creation_flags=creation_flags,
+                env=env,
             )
             if proc_info is None:
                 err = self._api.get_last_error()
@@ -893,7 +927,38 @@ class JobObjectProcessManager:
                     ),
                 )
 
-            # 7. Resume thread
+            # 7. Pre-resume hook (while thread is still suspended)
+            inferred_name = process_name or os.path.basename(
+                command_line.strip().split()[0].strip('"')
+            )
+            if pre_resume_hook is not None:
+                stage = "pre_resume_hook"
+                suspended_identity = ProcessIdentity(
+                    pid=pid,
+                    process_handle=process_handle,
+                    thread_handle=thread_handle,
+                    process_creation_time=creation_time,
+                    job_handle=job_handle,
+                    process_name=inferred_name,
+                    command_line=command_line,
+                    created_at=time.time(),
+                    state=LauncherState.VALIDATED,
+                )
+                try:
+                    pre_resume_hook(suspended_identity)
+                except Exception as exc:
+                    clean = self._safe_abort(job_handle, process_handle, thread_handle)
+                    return LaunchResult(
+                        ok=False,
+                        error=JobObjectError(
+                            stage=stage,
+                            code="PRE_RESUME_HOOK_FAILED",
+                            message=f"pre_resume_hook failed: {exc}",
+                            aborted_cleanly=clean,
+                        ),
+                    )
+
+            # 8. Resume thread
             stage = "resume_thread"
             suspend_count = self._api.resume_thread(thread_handle)
             if suspend_count == 0xFFFFFFFF or suspend_count < 0:

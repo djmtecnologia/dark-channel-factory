@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -95,6 +95,7 @@ class FakeWin32Api:
         command_line: str,
         working_dir: Optional[str] = None,
         creation_flags: int = 0,
+        env: Optional[Mapping[str, str]] = None,
     ) -> Optional[Any]:
         self.calls.append("create_process_suspended")
         self._maybe_raise("create_process_suspended")
@@ -781,6 +782,82 @@ def test_close_with_no_handles_is_idempotent():
     assert api.closed_handles == []
 
 
+def test_close_handle_returning_false_preserves_ref_and_logs_win32_error(caplog):
+    api = FakeWin32Api()
+    mgr = JobObjectProcessManager(api=api)  # type: ignore[arg-type]
+    res = mgr.launch("python.exe")
+    assert res.ok and res.process is not None
+    proc = res.process
+
+    api.close_handle = lambda _h: False  # type: ignore[method-assign]
+    api.get_last_error = lambda: 6  # type: ignore[method-assign]  # ERROR_INVALID_HANDLE
+
+    with caplog.at_level("WARNING"):
+        proc.close()
+
+    assert proc.identity.thread_handle == 3001
+    assert proc.identity.process_handle == 2001
+    assert proc.identity.job_handle == 1001
+    assert proc._closed is False
+    assert "win32_err=6" in caplog.text
+
+
+def test_close_handle_false_on_one_handle_and_true_on_others():
+    api = FakeWin32Api()
+    mgr = JobObjectProcessManager(api=api)  # type: ignore[arg-type]
+    res = mgr.launch("python.exe")
+    assert res.ok and res.process is not None
+    proc = res.process
+
+    def selective_close(handle: int) -> bool:
+        api.closed_handles.append(handle)
+        return handle != 2001
+
+    api.close_handle = selective_close  # type: ignore[method-assign]
+    api.get_last_error = lambda: 5  # type: ignore[method-assign]
+
+    proc.close()
+
+    assert api.closed_handles == [3001, 2001, 1001]
+    assert proc.identity.thread_handle is None
+    assert proc.identity.process_handle == 2001
+    assert proc.identity.job_handle is None
+    assert proc._closed is False
+
+
+def test_close_retry_after_false_closes_only_pending_handle_and_marks_closed():
+    api = FakeWin32Api()
+    mgr = JobObjectProcessManager(api=api)  # type: ignore[arg-type]
+    res = mgr.launch("python.exe")
+    assert res.ok and res.process is not None
+    proc = res.process
+
+    fail_first = True
+
+    def flaky_close(handle: int) -> bool:
+        api.closed_handles.append(handle)
+        if handle == 2001 and fail_first:
+            return False
+        return True
+
+    api.close_handle = flaky_close  # type: ignore[method-assign]
+
+    proc.close()
+    assert api.closed_handles == [3001, 2001, 1001]
+    assert proc.identity.process_handle == 2001
+    assert proc._closed is False
+
+    fail_first = False
+    proc.close()
+    assert api.closed_handles == [3001, 2001, 1001, 2001]
+    assert proc.identity.process_handle is None
+    assert proc._closed is True
+
+    # Idempotent after _closed=True
+    proc.close()
+    assert api.closed_handles == [3001, 2001, 1001, 2001]
+
+
 # ---------------------------------------------------------------------------
 # Process Creation Flags Tests (Sprint 2.7 Task 1.4)
 # ---------------------------------------------------------------------------
@@ -948,6 +1025,82 @@ def test_job_with_no_active_processes_queries_and_terminates():
     proc.close()
     assert proc._closed is True
     assert api.closed_handles == []
+
+
+def test_close_handle_returning_false_preserves_ref_and_logs_win32_error(caplog):
+    api = FakeWin32Api()
+    mgr = JobObjectProcessManager(api=api)  # type: ignore[arg-type]
+    res = mgr.launch("python.exe")
+    assert res.ok and res.process is not None
+    proc = res.process
+
+    api.close_handle = lambda _h: False  # type: ignore[method-assign]
+    api.get_last_error = lambda: 6  # type: ignore[method-assign]  # ERROR_INVALID_HANDLE
+
+    with caplog.at_level("WARNING"):
+        proc.close()
+
+    assert proc.identity.thread_handle == 3001
+    assert proc.identity.process_handle == 2001
+    assert proc.identity.job_handle == 1001
+    assert proc._closed is False
+    assert "win32_err=6" in caplog.text
+
+
+def test_close_handle_false_on_one_handle_and_true_on_others():
+    api = FakeWin32Api()
+    mgr = JobObjectProcessManager(api=api)  # type: ignore[arg-type]
+    res = mgr.launch("python.exe")
+    assert res.ok and res.process is not None
+    proc = res.process
+
+    def selective_close(handle: int) -> bool:
+        api.closed_handles.append(handle)
+        return handle != 2001
+
+    api.close_handle = selective_close  # type: ignore[method-assign]
+    api.get_last_error = lambda: 5  # type: ignore[method-assign]
+
+    proc.close()
+
+    assert api.closed_handles == [3001, 2001, 1001]
+    assert proc.identity.thread_handle is None
+    assert proc.identity.process_handle == 2001
+    assert proc.identity.job_handle is None
+    assert proc._closed is False
+
+
+def test_close_retry_after_false_closes_only_pending_handle_and_marks_closed():
+    api = FakeWin32Api()
+    mgr = JobObjectProcessManager(api=api)  # type: ignore[arg-type]
+    res = mgr.launch("python.exe")
+    assert res.ok and res.process is not None
+    proc = res.process
+
+    fail_first = True
+
+    def flaky_close(handle: int) -> bool:
+        api.closed_handles.append(handle)
+        if handle == 2001 and fail_first:
+            return False
+        return True
+
+    api.close_handle = flaky_close  # type: ignore[method-assign]
+
+    proc.close()
+    assert api.closed_handles == [3001, 2001, 1001]
+    assert proc.identity.process_handle == 2001
+    assert proc._closed is False
+
+    fail_first = False
+    proc.close()
+    assert api.closed_handles == [3001, 2001, 1001, 2001]
+    assert proc.identity.process_handle is None
+    assert proc._closed is True
+
+    # Idempotent after _closed=True
+    proc.close()
+    assert api.closed_handles == [3001, 2001, 1001, 2001]
 
 
 # ---------------------------------------------------------------------------

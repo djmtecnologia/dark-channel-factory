@@ -1,5 +1,11 @@
 """Windows Job Object process management for isolated watchdog execution."""
 
+from desktop_worker.watchdog.identity import (
+    CanonicalExecutionIdentity,
+    IdentityStatus,
+    IdentityValidator,
+    IdentityVerificationResult,
+)
 from desktop_worker.watchdog.job_object import (
     CREATE_SUSPENDED,
     ERROR_MORE_DATA,
@@ -18,10 +24,23 @@ from desktop_worker.watchdog.job_object import (
     TerminationStatus,
     Win32Api,
 )
+from desktop_worker.watchdog.process_launcher import (
+    AttemptLaunchContext,
+    IsolatedUploadLaunchResult,
+    ProcessLauncherError,
+    build_upload_environment,
+    launch_isolated_upload,
+)
 
 __all__ = [
+    "AttemptLaunchContext",
+    "CanonicalExecutionIdentity",
     "CREATE_SUSPENDED",
     "ERROR_MORE_DATA",
+    "IdentityStatus",
+    "IdentityValidator",
+    "IdentityVerificationResult",
+    "IsolatedUploadLaunchResult",
     "JOB_OBJECT_LIMIT_BREAKAWAY_OK",
     "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
     "JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK",
@@ -33,7 +52,10 @@ __all__ = [
     "ManagedJobProcess",
     "ProcessIdListResult",
     "ProcessIdentity",
+    "ProcessLauncherError",
     "TerminationResult",
     "TerminationStatus",
     "Win32Api",
+    "build_upload_environment",
+    "launch_isolated_upload",
 ]
