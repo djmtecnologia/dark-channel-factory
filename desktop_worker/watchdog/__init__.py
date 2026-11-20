@@ -99,6 +99,31 @@ from desktop_worker.watchdog.watchdog_daemon import (
     WindowsNamedMutex,
     spawn_detached_watchdog_daemon,
 )
+from desktop_worker.watchdog.termination_evidence import (
+    EvidencePersistenceResult,
+    TerminationEvidencePayload,
+    TerminationEvidenceRecorder,
+    TerminationOutboxEventType,
+    TerminationVerificationResult,
+    map_verification_to_outbox_event_type,
+)
+from desktop_worker.watchdog.job_handle_transfer import (
+    JOB_OBJECT_WATCHDOG_ACCESS,
+    AuthorizedJobHandle,
+    JobHandleTransferClient,
+    JobHandleTransferError,
+    JobHandleTransferServer,
+    Win32HandleTransferApi,
+    duplicate_job_handle_in_process,
+    duplicate_job_handle_to_process,
+)
+from desktop_worker.watchdog.termination_engine import (
+    OrphanClassification,
+    OrphanDetectionResult,
+    SafeTerminationEngine,
+    SafeTerminationOutcome,
+    TerminationContext,
+)
 
 __all__ = [
     "AttemptLaunchContext",
@@ -188,4 +213,23 @@ __all__ = [
     "Win32MutexApi",
     "WindowsNamedMutex",
     "spawn_detached_watchdog_daemon",
+    "EvidencePersistenceResult",
+    "TerminationEvidencePayload",
+    "TerminationEvidenceRecorder",
+    "TerminationOutboxEventType",
+    "TerminationVerificationResult",
+    "map_verification_to_outbox_event_type",
+    "JOB_OBJECT_WATCHDOG_ACCESS",
+    "AuthorizedJobHandle",
+    "JobHandleTransferClient",
+    "JobHandleTransferError",
+    "JobHandleTransferServer",
+    "Win32HandleTransferApi",
+    "duplicate_job_handle_in_process",
+    "duplicate_job_handle_to_process",
+    "OrphanClassification",
+    "OrphanDetectionResult",
+    "SafeTerminationEngine",
+    "SafeTerminationOutcome",
+    "TerminationContext",
 ]

@@ -33,6 +33,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple, Union
 
+from desktop_worker.watchdog.job_handle_transfer import (
+    JobHandleTransferServer,
+)
 from desktop_worker.watchdog.outbox import (
     OUTBOX_SCHEMA_VERSION,
     OutboxEventRecord,
@@ -144,6 +147,10 @@ class WatchdogAlreadyRunningError(WatchdogMutexError):
 
 class WatchdogSpawnError(WatchdogDaemonError):
     """Raised when spawning an independent detached daemon process fails."""
+
+
+class WatchdogIPCError(WatchdogDaemonError):
+    """Raised when the Watchdog IPC handle transfer server fails or is unavailable."""
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +507,8 @@ class HealthCheckSnapshot:
     last_cycle_at_utc: Optional[str]
     last_cycle_status: Optional[MonitoringStatus]
     current_error: Optional[str]
+    ipc_running: bool = False
+    ipc_port: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +544,14 @@ class WatchdogDaemon:
         store_factory: Optional[Callable[[Union[str, Path]], StateStore]] = None,
         clock: Optional[Callable[[], datetime]] = None,
         daemon_instance_id: Optional[str] = None,
+        termination_engine: Optional[Any] = None,
+        ipc_host: str = "127.0.0.1",
+        ipc_port: int = 0,
+        ipc_auth_token: Optional[str] = None,
+        expected_launcher_pid: Optional[int] = None,
+        expected_launcher_create_time: Optional[int] = None,
+        ipc_server_factory: Optional[Callable[..., JobHandleTransferServer]] = None,
+        ipc_enabled: Optional[bool] = None,
     ) -> None:
         if not isinstance(config, WatchdogConfig):
             raise WatchdogConfigError("config must be a WatchdogConfig instance")
@@ -544,6 +561,30 @@ class WatchdogDaemon:
         self._mutex = WindowsNamedMutex(config.mutex_name, api=mutex_api)
         self._store_factory = store_factory or (lambda path: StateStore(path))
         self._clock = clock or utc_now
+        self._termination_engine = termination_engine
+
+        self._ipc_host = ipc_host
+        self._ipc_port = int(ipc_port)
+        self._ipc_auth_token = ipc_auth_token
+        self._expected_launcher_pid = expected_launcher_pid
+        self._expected_launcher_create_time = expected_launcher_create_time
+        self._ipc_server_factory = ipc_server_factory
+        if ipc_enabled is not None:
+            self._ipc_enabled: bool = bool(ipc_enabled)
+        else:
+            self._ipc_enabled = any(
+                x is not None
+                for x in (
+                    termination_engine,
+                    ipc_auth_token,
+                    expected_launcher_pid,
+                    expected_launcher_create_time,
+                    ipc_server_factory,
+                )
+            ) or (self._ipc_port != 0)
+        self._ipc_server: Optional[JobHandleTransferServer] = None
+        self._ipc_started: bool = False
+        self._ipc_error: Optional[str] = None
 
         self._store: Optional[StateStore] = None
         self._state_lock = threading.Lock()
@@ -640,10 +681,222 @@ class WatchdogDaemon:
         with self._state_lock:
             return self._running and not self._stop_event.is_set()
 
+    @property
+    def ipc_running(self) -> bool:
+        with self._state_lock:
+            return (
+                self._ipc_started
+                and self._ipc_server is not None
+                and self._ipc_server.is_running
+            )
+
+    @property
+    def ipc_address(self) -> Optional[Tuple[str, int]]:
+        with self._state_lock:
+            if not self._ipc_started or self._ipc_server is None:
+                return None
+            return (self._ipc_host, self._ipc_server.port)
+
+    @property
+    def ipc_port(self) -> Optional[int]:
+        addr = self.ipc_address
+        return addr[1] if addr is not None else None
+
+    @property
+    def ipc_auth_token(self) -> Optional[str]:
+        with self._state_lock:
+            if self._ipc_server is not None:
+                return self._ipc_server.auth_token
+            return self._ipc_auth_token
+
+    @property
+    def ipc_error(self) -> Optional[str]:
+        with self._state_lock:
+            return self._ipc_error
+
+    def _on_ipc_register_handle(
+        self,
+        execution_id: str,
+        job_handle: int,
+        attempt_id: str,
+        fencing_token: int,
+        source_pid: int,
+        source_process_create_time: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        """Real IPC callback bound to SafeTerminationEngine.accept_transferred_job_handle."""
+        if self._stop_event.is_set() or not self._mutex.is_owned:
+            return False, "WatchdogDaemon is not active or does not own Mutex"
+        if self._termination_engine is None:
+            return False, "No termination_engine configured on WatchdogDaemon"
+        wd_ct = (
+            self._ipc_server.watchdog_create_time
+            if self._ipc_server is not None
+            else None
+        )
+        return self._termination_engine.accept_transferred_job_handle(
+            execution_id,
+            job_handle,
+            attempt_id=attempt_id,
+            fencing_token=fencing_token,
+            source_pid=source_pid,
+            source_process_create_time=source_process_create_time,
+            watchdog_pid=os.getpid(),
+            watchdog_process_create_time=wd_ct,
+            daemon_instance_id=self.daemon_instance_id,
+        )
+
+    def _on_ipc_unregister_handle(self, execution_id: str) -> bool:
+        """Real IPC callback bound to SafeTerminationEngine.unregister_job_handle."""
+        if self._termination_engine is None:
+            return False
+        return bool(self._termination_engine.unregister_job_handle(execution_id))
+
+    def reauthorize_launcher(
+        self,
+        *,
+        new_launcher_pid: int,
+        new_launcher_create_time: int,
+        auth_token: str,
+        reason: str = "launcher_restart",
+    ) -> Tuple[int, int]:
+        """Explicitly reauthorize a restarted Launcher process on the active IPC server."""
+        if self._stop_event.is_set() or not self._mutex.is_owned:
+            raise WatchdogDaemonError(
+                "Cannot reauthorize launcher: WatchdogDaemon is not active or does not own Mutex"
+            )
+        with self._state_lock:
+            server = self._ipc_server
+        if server is None or not server.is_running:
+            raise WatchdogIPCError(
+                "Cannot reauthorize launcher: IPC handle transfer server is not running"
+            )
+        result = server.reauthorize_launcher(
+            new_launcher_pid=new_launcher_pid,
+            new_launcher_create_time=new_launcher_create_time,
+            auth_token=auth_token,
+            reason=reason,
+        )
+        self._expected_launcher_pid = result[0]
+        self._expected_launcher_create_time = result[1]
+        return result
+
+    def _start_ipc_server(self) -> None:
+        """Start the authenticated JobHandleTransferServer during daemon startup."""
+        if not self._ipc_enabled:
+            return
+        factory = self._ipc_server_factory or JobHandleTransferServer
+        try:
+            server = factory(
+                on_register=self._on_ipc_register_handle,
+                on_unregister=self._on_ipc_unregister_handle,
+                auth_token=self._ipc_auth_token,
+                host=self._ipc_host,
+                port=self._ipc_port,
+                daemon_instance_id=self.daemon_instance_id,
+                expected_launcher_pid=self._expected_launcher_pid,
+                expected_launcher_create_time=self._expected_launcher_create_time,
+            )
+            host, port = server.start()
+            with self._state_lock:
+                self._ipc_server = server
+                self._ipc_started = True
+                self._ipc_error = None
+            self._log(
+                logging.INFO,
+                f"Started JobHandleTransferServer on {host}:{port}",
+            )
+        except Exception as exc:
+            err_msg = f"Failed to start JobHandleTransferServer: {exc}"
+            with self._state_lock:
+                self._ipc_server = None
+                self._ipc_started = False
+                self._ipc_error = err_msg
+                self._current_error = err_msg
+            self._log(
+                logging.ERROR,
+                err_msg,
+                error_code="IPC_SERVER_START_FAILED",
+            )
+            raise WatchdogIPCError(err_msg) from exc
+
+    def _stop_ipc_server(self, timeout_sec: float = 2.0) -> bool:
+        """Deterministically close the JobHandleTransferServer and verify its thread exits.
+
+        Returns ``True`` iff the IPC server thread exited cleanly (or was not running).
+        Returns ``False`` if the thread failed to exit within ``timeout_sec``.
+        """
+        with self._state_lock:
+            server = self._ipc_server
+        if server is None:
+            with self._state_lock:
+                self._ipc_started = False
+            return True
+        try:
+            closed = server.close(timeout_sec=timeout_sec)
+            # Support custom/mock servers whose close() returns None
+            if closed is False:
+                self._log(
+                    logging.ERROR,
+                    "JobHandleTransferServer thread did not exit within timeout; "
+                    "refusing to declare clean shutdown",
+                    error_code="IPC_SERVER_STOP_TIMEOUT",
+                )
+                return False
+            with self._state_lock:
+                self._ipc_server = None
+                self._ipc_started = False
+            self._log(logging.INFO, "Stopped JobHandleTransferServer cleanly")
+            return True
+        except Exception as exc:
+            self._log(
+                logging.ERROR,
+                f"Error stopping JobHandleTransferServer: {exc}",
+                error_code="IPC_SERVER_STOP_ERROR",
+            )
+            return False
+
+    def request_safe_termination(
+        self,
+        context: Any,
+        *,
+        timeout_ms: Optional[int] = None,
+        exit_code: int = 1,
+    ) -> Any:
+        """Delegate a safe termination request to the configured termination engine.
+
+        Fail-closed: requires configured ``termination_engine``, running IPC
+        handle transfer server, and Mutex ownership. Acquires ``_cycle_lock``
+        so daemon shutdown waits for any in-flight termination to finish cleanly.
+        """
+        if self._termination_engine is None:
+            raise WatchdogDaemonError(
+                "No termination_engine configured on WatchdogDaemon"
+            )
+        if not self._mutex.is_owned:
+            raise WatchdogDaemonError(
+                "Cannot execute safe termination without Mutex ownership"
+            )
+        if not self.ipc_running:
+            raise WatchdogIPCError(
+                "Cannot execute safe termination: IPC handle transfer server is not running"
+            )
+        with self._cycle_lock:
+            return self._termination_engine.terminate_execution(
+                context,
+                timeout_ms=timeout_ms,
+                exit_code=exit_code,
+            )
+
     def health_check(self) -> HealthCheckSnapshot:
         """Return current daemon health snapshot (does not imply upload health)."""
         with self._state_lock:
             last = self._last_cycle_result
+            ipc_up = (
+                self._ipc_started
+                and self._ipc_server is not None
+                and self._ipc_server.is_running
+            )
+            ipc_port = self._ipc_server.port if (ipc_up and self._ipc_server is not None) else None
             return HealthCheckSnapshot(
                 worker_id=self.config.worker_id,
                 daemon_instance_id=self.daemon_instance_id,
@@ -655,6 +908,8 @@ class WatchdogDaemon:
                 last_cycle_at_utc=last.timestamp_utc if last else None,
                 last_cycle_status=last.overall_status if last else None,
                 current_error=self._current_error,
+                ipc_running=ipc_up,
+                ipc_port=ipc_port,
             )
 
     _REQUIRED_STATE_STORE_TABLES = frozenset(
@@ -791,6 +1046,7 @@ class WatchdogDaemon:
 
         try:
             self._open_store()
+            self._start_ipc_server()
             with self._state_lock:
                 self._running = True
             self._log(
@@ -808,17 +1064,19 @@ class WatchdogDaemon:
             )
             return mutex_result
         except Exception:
+            self._stop_ipc_server()
             self._close_store()
             self.release_mutex()
             raise
 
     def stop(self, timeout_sec: Optional[float] = None) -> bool:
-        """Request controlled shutdown, wait for active cycle, and release resources.
+        """Request controlled shutdown, stop IPC server, wait for active cycle, and release resources.
 
-        If an active monitoring cycle does not complete within `timeout_sec`,
-        this method refuses to close the State Store or release the Named Mutex
-        so no second instance can acquire the Mutex while the active cycle may
-        still be using the SQLite connection.
+        If the IPC server thread or an active monitoring/termination cycle does
+        not complete within `timeout_sec`, this method refuses to close
+        shared resources (`termination_engine`, `StateStore`) or release the
+        Named Mutex so no second instance can acquire the Mutex while the IPC
+        server or active cycle may still be processing requests.
         """
         wait_timeout = (
             self.config.stop_timeout_sec if timeout_sec is None else float(timeout_sec)
@@ -826,6 +1084,16 @@ class WatchdogDaemon:
         self._stop_event.set()
         with self._state_lock:
             self._running = False
+
+        ipc_stopped = self._stop_ipc_server(timeout_sec=wait_timeout)
+        if not ipc_stopped:
+            self._log(
+                logging.ERROR,
+                "WatchdogDaemon did not complete clean shutdown: IPC server thread did not "
+                f"exit within {wait_timeout:.2f}s; State Store kept open and Mutex held",
+                error_code="UNCLEAN_SHUTDOWN",
+            )
+            return False
 
         clean_cycle_finish = self._cycle_lock.acquire(timeout=max(0.0, wait_timeout))
         if not clean_cycle_finish:
@@ -838,6 +1106,17 @@ class WatchdogDaemon:
             return False
 
         try:
+            if self._termination_engine is not None and hasattr(
+                self._termination_engine, "close"
+            ):
+                try:
+                    self._termination_engine.close()
+                except Exception as exc:
+                    self._log(
+                        logging.WARNING,
+                        f"Error closing termination_engine handles: {exc}",
+                        error_code="TERMINATION_ENGINE_CLOSE_ERROR",
+                    )
             self._close_store()
             mutex_released = self.release_mutex()
         finally:
